@@ -139,7 +139,7 @@ if st.sidebar.button("Se connecter"):
     # -----------------------------
     if user_role == "ADV":
         st.header("Espace ADV — Gestion stock & validation commandes")
-        menu = st.tabs(["Ajouter Entrée Stock", "Valider Commandes", "État du Stock"])
+        menu = st.tabs(["Ajouter Entrée Stock", "Valider Commandes", "État du Stock", "État des Ventes"])
 
         # ---------------- Entrée Stock ----------------
         with menu[0]:
@@ -168,7 +168,6 @@ if st.sidebar.button("Se connecter"):
                     st.info("Aucune commande en attente.")
                 else:
                     st.dataframe(df_cmd)
-
                     cmd_id = st.selectbox("Sélectionner commande à valider", df_cmd['ID'])
                     if st.button("Valider Commande"):
                         row_index = find_row_index(SHEET_COMMANDES, "ID", cmd_id)
@@ -179,6 +178,16 @@ if st.sidebar.button("Se connecter"):
         with menu[2]:
             st.subheader("État actuel du stock distributeur")
             st.dataframe(compute_stock_distributeur())
+
+        # ---------------- État des Ventes ----------------
+        with menu[3]:
+            st.subheader("État des ventes validées")
+            df_cmd = load_sheet_df(SHEET_COMMANDES)
+            df_ventes = df_cmd[df_cmd['Statut'] == "Validée"]
+            if df_ventes.empty:
+                st.info("Aucune vente validée.")
+            else:
+                st.dataframe(df_ventes[['Produit', 'Quantité', 'POS', 'Code_Vendeur', 'Date_Visite', 'Statut']])
 
     # -----------------------------
     # INTERFACE PREVENDEUR
