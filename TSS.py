@@ -159,18 +159,21 @@ if st.sidebar.button("Se connecter"):
         # ---------------- Valider Commandes ----------------
         with menu[1]:
             df_cmd = load_sheet_df(SHEET_COMMANDES)
-            df_cmd = df_cmd[df_cmd['Statut'] == "En attente"]
-
-            if df_cmd.empty:
-                st.info("Aucune commande en attente.")
+            if 'ID' not in df_cmd.columns:
+                st.error("La feuille 'Commandes_POS' doit contenir une colonne 'ID'.")
             else:
-                st.dataframe(df_cmd)
+                df_cmd = df_cmd[df_cmd['Statut'] == "En attente"]
 
-                cmd_id = st.selectbox("Sélectionner commande à valider", df_cmd['ID'])
-                if st.button("Valider Commande"):
-                    row_index = find_row_index(SHEET_COMMANDES, "ID", cmd_id)
-                    update_cell(SHEET_COMMANDES, row_index, "Statut", "Validée")
-                    st.success("Commande validée.")
+                if df_cmd.empty:
+                    st.info("Aucune commande en attente.")
+                else:
+                    st.dataframe(df_cmd)
+
+                    cmd_id = st.selectbox("Sélectionner commande à valider", df_cmd['ID'])
+                    if st.button("Valider Commande"):
+                        row_index = find_row_index(SHEET_COMMANDES, "ID", cmd_id)
+                        update_cell(SHEET_COMMANDES, row_index, "Statut", "Validée")
+                        st.success("Commande validée.")
 
         # ---------------- État Stock ----------------
         with menu[2]:
@@ -183,41 +186,41 @@ if st.sidebar.button("Se connecter"):
     elif user_role == "PreVendeur":
         st.header("Espace Prévendeur — Prise de commandes POS")
 
-        # Plan de visite du jour
         today = datetime.today().strftime("%Y-%m-%d")
         df_list_pos['Date_Visite'] = pd.to_datetime(df_list_pos['Date_Visite'], errors='coerce').dt.strftime('%Y-%m-%d')
-
         df_today = df_list_pos[
             (df_list_pos['Code_Vendeur'] == user_code_vendeur) &
             (df_list_pos['Date_Visite'] == today)
         ]
 
-        st.subheader("Plan de visite du jour")
+        # Affichage côte à côte : Plan visite + saisie commande
+        col1, col2 = st.columns(2)
 
-        if df_today.empty:
-            st.warning("Aucun POS prévu aujourd'hui.")
-        else:
-            st.dataframe(df_today)
+        with col1:
+            st.subheader("Plan de visite du jour")
+            if df_today.empty:
+                st.warning("Aucun POS prévu aujourd'hui.")
+            else:
+                st.dataframe(df_today)
 
-        # Prise commande
-        st.subheader("Nouvelle commande POS")
+        with col2:
+            st.subheader("Nouvelle commande POS")
+            if not df_today.empty:
+                pos_select = st.selectbox("Sélectionner POS", df_today['Nom_POS'])
+                produit = st.selectbox("Produit", produits_dispo)
+                qte = st.number_input("Quantité", min_value=1, step=1)
 
-        if not df_today.empty:
-            pos_select = st.selectbox("Sélectionner POS", df_today['Nom_POS'])
-            produit = st.selectbox("Produit", produits_dispo)
-            qte = st.number_input("Quantité", min_value=1, step=1)
-
-            if st.button("Enregistrer Commande"):
-                append_row(SHEET_COMMANDES, [
-                    str(uuid.uuid4()),
-                    pos_select,
-                    produit,
-                    qte,
-                    user_code_vendeur,
-                    today,
-                    "En attente"
-                ])
-                st.success("Commande enregistrée.")
+                if st.button("Enregistrer Commande"):
+                    append_row(SHEET_COMMANDES, [
+                        str(uuid.uuid4()),
+                        pos_select,
+                        produit,
+                        qte,
+                        user_code_vendeur,
+                        today,
+                        "En attente"
+                    ])
+                    st.success("Commande enregistrée.")
 
         # Historique commandes
         st.subheader("Historique commandes")
