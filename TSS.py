@@ -90,160 +90,178 @@ df_list_vendeur = load_sheet_df(SHEET_LIST_VENDEUR)
 produits_dispo = df_produits['Nom Produit'].dropna().tolist() if not df_produits.empty else []
 
 # -----------------------------
-# Authentification utilisateur
+# Gestion session utilisateur
+# -----------------------------
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+if "user_info" not in st.session_state:
+    st.session_state.user_info = {}
+
+# -----------------------------
+# Authentification
 # -----------------------------
 st.sidebar.header("Connexion")
 
-email_input = st.sidebar.text_input("Email")
-password_input = st.sidebar.text_input("Mot de passe", type="password")
+if not st.session_state.logged_in:
+    email_input = st.sidebar.text_input("Email")
+    password_input = st.sidebar.text_input("Mot de passe", type="password")
 
-if st.sidebar.button("Se connecter"):
-    if df_users.empty:
-        st.sidebar.error("La feuille 'Utilisateurs' est vide.")
-        st.stop()
-
-    user_row = df_users[df_users['Email'] == email_input]
-    if user_row.empty:
-        st.sidebar.error("Email non reconnu.")
-        st.stop()
-
-    user_row = user_row.iloc[0]
-
-    # Mot de passe en clair
-    if user_row['Password'] != password_input:
-        st.sidebar.error("Mot de passe incorrect.")
-        st.stop()
-
-    user_name = user_row.get('Nom', 'Utilisateur')
-    user_role = user_row.get('Role', 'PreVendeur')
-    user_code_vendeur = user_row.get('Code_Vendeur', '')
-
-    st.sidebar.success(f"Connecté : {user_name} — {user_role}")
-
-    # -----------------------------
-    # Calcul stock distributeur
-    # -----------------------------
-    @st.cache_data(ttl=10)
-    def compute_stock_distributeur():
-        df = load_sheet_df(SHEET_STOCK_DIST)
-        if df.empty:
-            return pd.DataFrame(columns=['Produit', 'Stock'])
-        df['Quantite_entree'] = pd.to_numeric(df['Quantite_entree'].fillna(0))
-        df['Quantite_sortie'] = pd.to_numeric(df['Quantite_sortie'].fillna(0))
-        grp = df.groupby('Produit').agg({'Quantite_entree':'sum','Quantite_sortie':'sum'}).reset_index()
-        grp['Stock'] = grp['Quantite_entree'] - grp['Quantite_sortie']
-        return grp[['Produit','Stock']]
-
-    # -----------------------------
-    # INTERFACE ADV
-    # -----------------------------
-    if user_role == "ADV":
-        st.header("Espace ADV — Gestion stock & validation commandes")
-        menu = st.tabs(["Ajouter Entrée Stock", "Valider Commandes", "État du Stock", "État des Ventes"])
-
-        # ---------------- Entrée Stock ----------------
-        with menu[0]:
-            st.subheader("Ajouter une entrée stock distributeur")
-            produit = st.selectbox("Produit", produits_dispo)
-            quantite = st.number_input("Quantité", min_value=1, step=1)
-
-            if st.button("Valider Entrée"):
-                append_row(SHEET_STOCK_DIST, [
-                    produit,
-                    quantite,
-                    0,
-                    datetime.today().strftime("%Y-%m-%d")
-                ])
-                st.success("Entrée stock enregistrée.")
-
-        # ---------------- Valider Commandes ----------------
-        with menu[1]:
-            df_cmd = load_sheet_df(SHEET_COMMANDES)
-            if 'ID' not in df_cmd.columns:
-                st.error("La feuille 'Commandes_POS' doit contenir une colonne 'ID'.")
+    if st.sidebar.button("Se connecter"):
+        if df_users.empty:
+            st.sidebar.error("La feuille 'Utilisateurs' est vide.")
+        else:
+            user_row = df_users[df_users['Email'] == email_input]
+            if user_row.empty:
+                st.sidebar.error("Email non reconnu.")
             else:
-                df_cmd = df_cmd[df_cmd['Statut'] == "En attente"]
-
-                if df_cmd.empty:
-                    st.info("Aucune commande en attente.")
+                user_row = user_row.iloc[0]
+                if user_row['Password'] != password_input:
+                    st.sidebar.error("Mot de passe incorrect.")
                 else:
-                    st.dataframe(df_cmd)
-                    cmd_id = st.selectbox("Sélectionner commande à valider", df_cmd['ID'])
-                    if st.button("Valider Commande"):
-                        row_index = find_row_index(SHEET_COMMANDES, "ID", cmd_id)
-                        update_cell(SHEET_COMMANDES, row_index, "Statut", "Validée")
-                        st.success("Commande validée.")
+                    st.session_state.logged_in = True
+                    st.session_state.user_info = {
+                        "Nom": user_row.get("Nom"),
+                        "Role": user_row.get("Role"),
+                        "Code_Vendeur": user_row.get("Code_Vendeur")
+                    }
+    st.stop()  # Stoppe le script tant que l'utilisateur n'est pas connecté
 
-        # ---------------- État Stock ----------------
-        with menu[2]:
-            st.subheader("État actuel du stock distributeur")
-            st.dataframe(compute_stock_distributeur())
+user_name = st.session_state.user_info["Nom"]
+user_role = st.session_state.user_info["Role"]
+user_code_vendeur = st.session_state.user_info["Code_Vendeur"]
 
-        # ---------------- État des Ventes ----------------
-        with menu[3]:
-            st.subheader("État des ventes validées")
-            df_cmd = load_sheet_df(SHEET_COMMANDES)
-            df_ventes = df_cmd[df_cmd['Statut'] == "Validée"]
-            if df_ventes.empty:
-                st.info("Aucune vente validée.")
-            else:
-                st.dataframe(df_ventes[['Produit', 'Quantité', 'POS', 'Code_Vendeur', 'Date_Visite', 'Statut']])
+st.sidebar.success(f"Connecté : {user_name} — {user_role}")
 
-    # -----------------------------
-    # INTERFACE PREVENDEUR
-    # -----------------------------
-    elif user_role == "PreVendeur":
-        st.header("Espace Prévendeur — Prise de commandes POS")
+# -----------------------------
+# Calcul stock distributeur
+# -----------------------------
+@st.cache_data(ttl=10)
+def compute_stock_distributeur():
+    df = load_sheet_df(SHEET_STOCK_DIST)
+    if df.empty:
+        return pd.DataFrame(columns=['Produit', 'Stock'])
+    df['Quantite_entree'] = pd.to_numeric(df['Quantite_entree'].fillna(0))
+    df['Quantite_sortie'] = pd.to_numeric(df['Quantite_sortie'].fillna(0))
+    grp = df.groupby('Produit').agg({'Quantite_entree':'sum','Quantite_sortie':'sum'}).reset_index()
+    grp['Stock'] = grp['Quantite_entree'] - grp['Quantite_sortie']
+    return grp[['Produit','Stock']]
 
-        today = datetime.today().strftime("%Y-%m-%d")
-        df_list_pos['Date_Visite'] = pd.to_datetime(df_list_pos['Date_Visite'], errors='coerce').dt.strftime('%Y-%m-%d')
-        df_today = df_list_pos[
-            (df_list_pos['Code_Vendeur'] == user_code_vendeur) &
-            (df_list_pos['Date_Visite'] == today)
-        ]
+# -----------------------------
+# Interface ADV
+# -----------------------------
+if user_role == "ADV":
+    st.header("Espace ADV — Gestion stock & validation commandes")
+    menu = st.tabs(["Ajouter Entrée Stock", "Valider Commandes", "État du Stock", "État des Ventes"])
 
-        # Onglets horizontaux
-        tabs_prev = st.tabs(["📅 Plan de visite", "📝 Nouvelle commande", "📄 Historique commandes"])
+    # ---------------- Entrée Stock ----------------
+    with menu[0]:
+        st.subheader("Ajouter une entrée stock distributeur")
+        produit = st.selectbox("Produit", produits_dispo)
+        quantite = st.number_input("Quantité", min_value=1, step=1)
 
-        # ---------------- Onglet 1 : Plan de visite ----------------
-        with tabs_prev[0]:
-            st.subheader("Plan de visite du jour")
-            if df_today.empty:
-                st.warning("Aucun POS prévu aujourd'hui.")
-            else:
-                st.dataframe(df_today)
+        if st.button("Valider Entrée"):
+            append_row(SHEET_STOCK_DIST, [
+                produit,
+                quantite,
+                0,
+                datetime.today().strftime("%Y-%m-%d")
+            ])
+            st.success("Entrée stock enregistrée.")
 
-        # ---------------- Onglet 2 : Nouvelle commande ----------------
-        with tabs_prev[1]:
-            st.subheader("Saisie de nouvelle commande POS")
-            if df_today.empty:
-                st.warning("Aucun POS prévu aujourd'hui pour saisir une commande.")
-            else:
-                pos_select = st.selectbox("Sélectionner POS", df_today['Nom_POS'])
-                produit = st.selectbox("Produit", produits_dispo)
-                qte = st.number_input("Quantité", min_value=1, step=1)
-
-                if st.button("Enregistrer Commande"):
-                    append_row(SHEET_COMMANDES, [
-                        str(uuid.uuid4()),   # ID unique
-                        pos_select,
-                        produit,
-                        qte,
-                        user_code_vendeur,
-                        today,
-                        "En attente"
-                    ])
-                    st.success("Commande enregistrée.")
-
-        # ---------------- Onglet 3 : Historique ----------------
-        with tabs_prev[2]:
-            st.subheader("Historique commandes")
-            df_cmd = load_sheet_df(SHEET_COMMANDES)
-            df_cmd = df_cmd[df_cmd['Code_Vendeur'] == user_code_vendeur]
+    # ---------------- Valider Commandes ----------------
+    with menu[1]:
+        df_cmd = load_sheet_df(SHEET_COMMANDES)
+        if 'ID' not in df_cmd.columns:
+            st.error("La feuille 'Commandes_POS' doit contenir une colonne 'ID'.")
+        else:
+            df_cmd = df_cmd[df_cmd['Statut'] == "En attente"]
             if df_cmd.empty:
-                st.info("Aucune commande enregistrée.")
+                st.info("Aucune commande en attente.")
             else:
                 st.dataframe(df_cmd)
 
-    else:
-        st.warning("Rôle non reconnu. Vérifie la feuille Utilisateurs.")
+                if "cmd_id" not in st.session_state:
+                    st.session_state.cmd_id = df_cmd['ID'].iloc[0]
+
+                st.session_state.cmd_id = st.selectbox("Sélectionner commande à valider", df_cmd['ID'], index=0)
+
+                if st.button("Valider Commande"):
+                    row_index = find_row_index(SHEET_COMMANDES, "ID", st.session_state.cmd_id)
+                    if row_index:
+                        update_cell(SHEET_COMMANDES, row_index, "Statut", "Validée")
+                        st.success("Commande validée !")
+                        st.experimental_rerun()  # Rechargement pour mettre à jour l'affichage
+
+    # ---------------- État Stock ----------------
+    with menu[2]:
+        st.subheader("État actuel du stock distributeur")
+        st.dataframe(compute_stock_distributeur())
+
+    # ---------------- État des Ventes ----------------
+    with menu[3]:
+        st.subheader("État des ventes validées")
+        df_cmd = load_sheet_df(SHEET_COMMANDES)
+        df_ventes = df_cmd[df_cmd['Statut'] == "Validée"] if not df_cmd.empty else pd.DataFrame()
+        if df_ventes.empty:
+            st.info("Aucune vente validée.")
+        else:
+            st.dataframe(df_ventes[['Produit', 'Quantité', 'POS', 'Code_Vendeur', 'Date_Visite', 'Statut']])
+
+# -----------------------------
+# Interface Prévendeur
+# -----------------------------
+elif user_role == "PreVendeur":
+    st.header("Espace Prévendeur — Prise de commandes POS")
+
+    today = datetime.today().strftime("%Y-%m-%d")
+    df_list_pos['Date_Visite'] = pd.to_datetime(df_list_pos['Date_Visite'], errors='coerce').dt.strftime('%Y-%m-%d')
+    df_today = df_list_pos[
+        (df_list_pos['Code_Vendeur'] == user_code_vendeur) &
+        (df_list_pos['Date_Visite'] == today)
+    ]
+
+    # Onglets horizontaux
+    tabs_prev = st.tabs(["📅 Plan de visite", "📝 Nouvelle commande", "📄 Historique commandes"])
+
+    # ---------------- Onglet 1 : Plan de visite ----------------
+    with tabs_prev[0]:
+        st.subheader("Plan de visite du jour")
+        if df_today.empty:
+            st.warning("Aucun POS prévu aujourd'hui.")
+        else:
+            st.dataframe(df_today)
+
+    # ---------------- Onglet 2 : Nouvelle commande ----------------
+    with tabs_prev[1]:
+        st.subheader("Saisie de nouvelle commande POS")
+        if df_today.empty:
+            st.warning("Aucun POS prévu aujourd'hui pour saisir une commande.")
+        else:
+            pos_select = st.selectbox("Sélectionner POS", df_today['Nom_POS'])
+            produit = st.selectbox("Produit", produits_dispo)
+            qte = st.number_input("Quantité", min_value=1, step=1)
+
+            if st.button("Enregistrer Commande"):
+                append_row(SHEET_COMMANDES, [
+                    str(uuid.uuid4()),   # ID unique
+                    pos_select,
+                    produit,
+                    qte,
+                    user_code_vendeur,
+                    today,
+                    "En attente"
+                ])
+                st.success("Commande enregistrée.")
+
+    # ---------------- Onglet 3 : Historique ----------------
+    with tabs_prev[2]:
+        st.subheader("Historique commandes")
+        df_cmd = load_sheet_df(SHEET_COMMANDES)
+        df_cmd = df_cmd[df_cmd['Code_Vendeur'] == user_code_vendeur]
+        if df_cmd.empty:
+            st.info("Aucune commande enregistrée.")
+        else:
+            st.dataframe(df_cmd)
+
+else:
+    st.warning("Rôle non reconnu. Vérifie la feuille Utilisateurs.")
