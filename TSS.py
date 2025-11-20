@@ -4,13 +4,11 @@ import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
 import uuid
-import hashlib
 
 # -----------------------------
 # Configuration Streamlit
 # -----------------------------
 st.set_page_config(page_title="TSS - Distribution", layout="wide")
-st.title("📊 TSS - Distribution (Distributeur → POS)")
 
 # -----------------------------
 # Google Sheets / gspread
@@ -20,43 +18,90 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive"
 ]
 
+# Assure-toi d'ajouter tes credentials dans les secrets Streamlit sous "google"
 creds_dict = st.secrets.get("google")
 creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
 client = gspread.authorize(creds)
 
 SPREADSHEET_ID = "1SN02jxpV2oyc3tWItY9c2Kc_UEXfqTdtQSL9WgGAi3w"
 
+# -----------------------------
+# Fonctions utilitaires
+# -----------------------------
 def load_sheet_df(sheet_name):
+    """
+    Charge une feuille Google Sheet et nettoie :
+    - supprime espaces invisibles dans noms de colonnes
+    - strip les chaines dans les cellules
+    Retourne DataFrame (vide si erreur).
+    """
     try:
         sh = client.open_by_key(SPREADSHEET_ID)
-        worksheet = sh.worksheet(sheet_name)
-        data = worksheet.get_all_records()
-        df = pd.DataFrame(data)
+        ws = sh.worksheet(sheet_name)
+        records = ws.get_all_records()
+        df = pd.DataFrame(records)
+        if df.empty:
+            return df
+        # nettoyer colonnes et chaines
         df.columns = df.columns.str.strip()
+        df = df.applymap(lambda x: x.strip() if isinstance(x, str) else x)
         return df
     except Exception as e:
-        st.error(f"Erreur chargement feuille {sheet_name}: {e}")
+        # n'affiche pas d'erreur bloquante, retourne dataframe vide
+        st.warning(f"Impossible de charger la feuille '{sheet_name}' ({e})")
         return pd.DataFrame()
 
 def append_row(sheet_name, row_values):
     sh = client.open_by_key(SPREADSHEET_ID)
-    worksheet = sh.worksheet(sheet_name)
-    worksheet.append_row(row_values)
+    ws = sh.worksheet(sheet_name)
+    ws.append_row(row_values)
 
 def update_cell(sheet_name, row, col_name, new_value):
+    """
+    Met à jour une cellule en cherchant l'index de la colonne par son nom.
+    row : numéro de ligne (1-indexed) dans Google Sheet
+    """
     sh = client.open_by_key(SPREADSHEET_ID)
-    worksheet = sh.worksheet(sheet_name)
-    headers = worksheet.row_values(1)
-    headers = [h.strip() for h in headers]
+    ws = sh.worksheet(sheet_name)
+    headers = [h.strip() for h in ws.row_values(1)]
     try:
         col_idx = headers.index(col_name) + 1
     except ValueError:
         return False
-    worksheet.update_cell(row, col_idx, new_value)
+    ws.update_cell(row, col_idx, new_value)
     return True
 
+def compute_stock_distributeur():
+    df = load_sheet_df("Stock_Distributeur")
+    if df.empty:
+        return pd.DataFrame(columns=['Produit', 'Stock'])
+    # gérer différents noms de colonnes possibles : standard attendu = Quantite_entree / Quantite_sortie / Produit
+    # normaliser noms si nécessaire
+    # convertir en numérique et agréger
+    for col in df.columns:
+        # rien, déjà nettoyé
+        pass
+    # assure colonnes
+    if 'Produit' not in df.columns:
+        return pd.DataFrame(columns=['Produit', 'Stock'])
+    q_in = [c for c in df.columns if c.lower().replace(" ", "") in ('quantiteentree','quantite_entree','entree','qty_in')]
+    q_out = [c for c in df.columns if c.lower().replace(" ", "") in ('quantitesortie','quantite_sortie','sortie','qty_out')]
+    col_in = q_in[0] if q_in else ('Quantite_entree' if 'Quantite_entree' in df.columns else None)
+    col_out = q_out[0] if q_out else ('Quantite_sortie' if 'Quantite_sortie' in df.columns else None)
+    if col_in is None:
+        df['Quantite_entree'] = 0
+    else:
+        df['Quantite_entree'] = pd.to_numeric(df[col_in].fillna(0))
+    if col_out is None:
+        df['Quantite_sortie'] = 0
+    else:
+        df['Quantite_sortie'] = pd.to_numeric(df[col_out].fillna(0))
+    grp = df.groupby('Produit', as_index=False).agg({'Quantite_entree':'sum','Quantite_sortie':'sum'})
+    grp['Stock'] = grp['Quantite_entree'] - grp['Quantite_sortie']
+    return grp[['Produit','Stock']]
+
 # -----------------------------
-# Feuilles Google Sheet
+# Noms des feuilles (adapter si nécessaire)
 # -----------------------------
 SHEET_USERS = "Utilisateurs"
 SHEET_PRODUITS = "Produits"
@@ -66,195 +111,277 @@ SHEET_STOCK_DIST = "Stock_Distributeur"
 SHEET_COMMANDES = "Commandes_POS"
 
 # -----------------------------
-# Chargement des données
+# Chargement initial des tables (non cached pour refléter changements en direct)
 # -----------------------------
 df_users = load_sheet_df(SHEET_USERS)
 df_produits = load_sheet_df(SHEET_PRODUITS)
 df_list_pos = load_sheet_df(SHEET_LIST_POS)
 df_list_vendeur = load_sheet_df(SHEET_LIST_VENDEUR)
-produits_dispo = df_produits['Nom Produit'].dropna().tolist() if not df_produits.empty else []
+
+produits_dispo = []
+if not df_produits.empty:
+    # tolérance: plusieurs noms possibles
+    for col_name in ('Nom Produit','NomProduit','Produit','Name'):
+        if col_name in df_produits.columns:
+            produits_dispo = df_produits[col_name].dropna().tolist()
+            break
 
 # -----------------------------
-# Session state initial
+# Initialiser session_state (sécurisé)
 # -----------------------------
-if "logged_in" not in st.session_state:
+if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
-if "user_email" not in st.session_state:
-    st.session_state.user_email = ""
-if "user_role" not in st.session_state:
-    st.session_state.user_role = ""
-if "user_name" not in st.session_state:
-    st.session_state.user_name = ""
-if "user_code_vendeur" not in st.session_state:
-    st.session_state.user_code_vendeur = ""
-if "stock_submitted" not in st.session_state:
+if 'user_email' not in st.session_state:
+    st.session_state.user_email = ''
+if 'user_role' not in st.session_state:
+    st.session_state.user_role = ''
+if 'user_name' not in st.session_state:
+    st.session_state.user_name = ''
+if 'user_code_vendeur' not in st.session_state:
+    st.session_state.user_code_vendeur = ''
+# flags pour rafraîchir UI immédiatement
+if 'stock_submitted' not in st.session_state:
     st.session_state.stock_submitted = False
-if "command_validated" not in st.session_state:
-    st.session_state.command_validated = False
-if "commande_submitted" not in st.session_state:
+if 'commande_submitted' not in st.session_state:
     st.session_state.commande_submitted = False
+if 'command_validated' not in st.session_state:
+    st.session_state.command_validated = False
 
 # -----------------------------
-# Authentification
+# Interface de connexion (mot de passe EN CLAIR)
 # -----------------------------
+st.sidebar.header("Connexion")
 if not st.session_state.logged_in:
-    st.sidebar.header("Connexion")
     email_input = st.sidebar.text_input("Email")
     password_input = st.sidebar.text_input("Mot de passe", type="password")
     if st.sidebar.button("Se connecter"):
+        # nettoyage des inputs
+        email_in = email_input.strip()
+        pwd_in = password_input.strip()
         if df_users.empty:
-            st.sidebar.error("La feuille 'Utilisateurs' est vide.")
+            st.sidebar.error("La feuille 'Utilisateurs' est vide ou introuvable.")
         else:
-            user_row = df_users[df_users['Email'] == email_input]
-            if user_row.empty:
-                st.sidebar.error("Email non reconnu.")
+            # col email normalisé
+            if 'Email' not in df_users.columns:
+                st.sidebar.error("La feuille 'Utilisateurs' doit contenir une colonne 'Email'.")
             else:
-                user_row = user_row.iloc[0]
-                hashed_password = hashlib.sha256(password_input.encode()).hexdigest()
-                if user_row['Password'] != hashed_password:
-                    st.sidebar.error("Mot de passe incorrect.")
+                # rechercher l'utilisateur (strip pour éviter espaces invisibles)
+                mask = df_users['Email'].astype(str).str.strip() == email_in
+                user_rows = df_users[mask]
+                if user_rows.empty:
+                    st.sidebar.error("Email non reconnu.")
                 else:
-                    # Connexion réussie
-                    st.session_state.logged_in = True
-                    st.session_state.user_email = user_row['Email']
-                    st.session_state.user_role = user_row.get('Role','PreVendeur')
-                    st.session_state.user_name = user_row.get('Nom','Utilisateur')
-                    st.session_state.user_code_vendeur = user_row.get('Code_Vendeur','')
-                    st.experimental_rerun()
+                    user = user_rows.iloc[0]
+                    # nettoyer mot de passe de la feuille
+                    pw_sheet = str(user.get('Password','')).strip()
+                    # comparaison en clair (pour debug / solution immédiate)
+                    if pw_sheet != pwd_in:
+                        st.sidebar.error("Mot de passe incorrect.")
+                    else:
+                        # connexion OK : stocker en session
+                        st.session_state.logged_in = True
+                        st.session_state.user_email = user.get('Email','').strip()
+                        st.session_state.user_role = user.get('Role','PreVendeur')
+                        st.session_state.user_name = user.get('Nom', user.get('Name', 'Utilisateur'))
+                        st.session_state.user_code_vendeur = user.get('Code_Vendeur', '')
+                        st.sidebar.success(f"Connecté : {st.session_state.user_name} — {st.session_state.user_role}")
+                        # Ne pas relancer l'app, on affiche directement l'interface (no rerun)
 
 # -----------------------------
-# Interface après connexion
+# Si connecté : afficher interface principale
 # -----------------------------
 if st.session_state.logged_in:
-    st.sidebar.success(f"Connecté : {st.session_state.user_name} — {st.session_state.user_role}")
+    st.header(f"📊 TSS - Distribution — {st.session_state.user_name} ({st.session_state.user_role})")
+    st.write("")  # petit espacement
 
-    # -----------------------------
-    # Helper: Stock distributeur
-    # -----------------------------
-    def compute_stock_distributeur():
-        df = load_sheet_df(SHEET_STOCK_DIST)
-        if df.empty:
-            return pd.DataFrame(columns=['Produit', 'Stock'])
-        df['Quantite_entree'] = pd.to_numeric(df['Quantite_entree'].fillna(0))
-        df['Quantite_sortie'] = pd.to_numeric(df['Quantite_sortie'].fillna(0))
-        grp = df.groupby('Produit').agg({'Quantite_entree':'sum','Quantite_sortie':'sum'}).reset_index()
-        grp['Stock'] = grp['Quantite_entree'] - grp['Quantite_sortie']
-        return grp[['Produit','Stock']]
+    # Recharger tables qui peuvent changer
+    df_produits = load_sheet_df(SHEET_PRODUITS)
+    df_list_pos = load_sheet_df(SHEET_LIST_POS)
+    # recalc produits_dispo si modifié
+    produits_dispo = []
+    if not df_produits.empty:
+        for col_name in ('Nom Produit','NomProduit','Produit','Name'):
+            if col_name in df_produits.columns:
+                produits_dispo = df_produits[col_name].dropna().tolist()
+                break
 
-    # -----------------------------
-    # Espace ADV
-    # -----------------------------
-    if st.session_state.user_role == "ADV":
-        st.header("Espace ADV — Gestion stock & validation commandes")
-        adv_tabs = st.tabs(["Ajouter Stock","État Stock","Commandes à valider","État des ventes"])
+    # ADV
+    if st.session_state.user_role == 'ADV':
+        st.subheader("Espace ADV — Gestion stock & validation commandes")
+        tabs = st.tabs(["Ajouter Stock","État Stock","Commandes à valider","État des ventes"])
 
-        # Ajouter Stock
-        with adv_tabs[0]:
-            st.subheader("Ajouter du stock")
-            with st.form("form_stock"):
-                produit_stock = st.selectbox("Produit *", produits_dispo)
-                prix_achat = 0.0
-                if 'Prix unitaire' in df_produits.columns:
-                    prix_vals = df_produits.loc[df_produits['Nom Produit']==produit_stock,'Prix unitaire'].values
-                    if len(prix_vals) > 0:
-                        prix_achat = float(prix_vals[0])
-                quantite_stock = st.number_input("Quantité achetée", min_value=1, step=1)
+        # ---------- Ajouter Stock ----------
+        with tabs[0]:
+            st.markdown("**Ajouter du stock au distributeur**")
+            with st.form("form_add_stock"):
+                produit_stock = st.selectbox("Produit *", produits_dispo) if produits_dispo else st.text_input("Produit *")
+                quantite_stock = st.number_input("Quantité achetée", min_value=1, step=1, value=1)
+                prix_achat = st.text_input("Prix unitaire (optionnel)", value="")
                 submitted = st.form_submit_button("Ajouter au stock")
                 if submitted:
-                    row = [str(datetime.now()), produit_stock, quantite_stock, prix_achat]
-                    append_row(SHEET_STOCK_DIST,row)
+                    prix_val = float(prix_achat) if prix_achat.strip() != "" else 0.0
+                    row = [str(datetime.now()), str(produit_stock), int(quantite_stock), prix_val]
+                    append_row(SHEET_STOCK_DIST, row)
+                    st.success(f"{quantite_stock} x {produit_stock} ajouté(s) au stock distributeur.")
+                    # forcer l'affichage immédiat
                     st.session_state.stock_submitted = True
-                    st.success(f"{quantite_stock} {produit_stock} ajouté(s) au stock.")
 
-            # Affichage immédiat
+            # affichage immédiat du stock si on vient d'ajouter
             if st.session_state.stock_submitted:
                 df_stock = compute_stock_distributeur()
-                st.dataframe(df_stock,use_container_width=True)
+                st.markdown("**Stock actuel (mis à jour)**")
+                st.dataframe(df_stock, use_container_width=True)
                 st.session_state.stock_submitted = False
 
-        # État Stock
-        with adv_tabs[1]:
-            st.subheader("État du stock")
+        # ---------- État Stock ----------
+        with tabs[1]:
+            st.markdown("**État du stock**")
             df_stock = compute_stock_distributeur()
-            if not df_stock.empty:
-                st.dataframe(df_stock,use_container_width=True)
+            if df_stock.empty:
+                st.info("Aucun stock enregistré.")
             else:
-                st.write("Aucun stock enregistré.")
+                st.dataframe(df_stock, use_container_width=True)
 
-        # Commandes à valider
-        with adv_tabs[2]:
-            st.subheader("Commandes à valider")
+        # ---------- Commandes à valider ----------
+        with tabs[2]:
+            st.markdown("**Commandes POS — En attente de validation**")
             df_cmd = load_sheet_df(SHEET_COMMANDES)
-            if not df_cmd.empty:
-                df_pending = df_cmd[df_cmd['Statut']=="En attente"]
-                if not df_pending.empty:
-                    for idx,row in df_pending.iterrows():
-                        st.markdown(f"**Commande ID : {row['ID']} — POS : {row['Code_POS']}**")
-                        st.dataframe(pd.DataFrame([row])[['Produit','Quantite','Code_Vendeur']],use_container_width=True)
-                        key_btn = f"valider_{row['ID']}"
-                        if st.button("Valider commande",key=key_btn):
-                            update_cell(SHEET_COMMANDES, idx+2, 'Statut', 'Validée')
-                            update_cell(SHEET_COMMANDES, idx+2, 'Date_validation', str(datetime.now()))
-                            update_cell(SHEET_COMMANDES, idx+2, 'Valide_par', st.session_state.user_email)
-                            st.success(f"Commande {row['ID']} validée !")
-                            st.session_state.command_validated = True
+            if df_cmd.empty:
+                st.info("Aucune commande enregistrée.")
+            else:
+                # s'assurer que la colonne Statut existe
+                if 'Statut' not in df_cmd.columns:
+                    st.warning("La feuille Commandes_POS n'a pas la colonne 'Statut'. Vérifie la feuille.")
                 else:
-                    st.write("Aucune commande en attente.")
-            else:
-                st.write("Aucune commande enregistrée.")
+                    df_pending = df_cmd[df_cmd['Statut'].astype(str).str.strip() == 'En attente']
+                    if df_pending.empty:
+                        st.info("Aucune commande en attente.")
+                    else:
+                        for i, r in df_pending.iterrows():
+                            st.markdown(f"**Commande ID : {r.get('ID')} — POS : {r.get('Code_POS','---')}**")
+                            # afficher détails utiles
+                            details = {k: r[k] for k in ['Produit','Quantite','Code_Vendeur'] if k in df_cmd.columns}
+                            st.json(details)
+                            # Bouton pour valider (utiliser un key unique)
+                            key_btn = f"valider_{r.get('ID')}"
+                            if st.button("Valider la commande", key=key_btn):
+                                # calculer la ligne à updater dans Google Sheet : trouver la row index
+                                # on recherche la cellule ID dans la feuille et on update
+                                try:
+                                    sh = client.open_by_key(SPREADSHEET_ID)
+                                    ws = sh.worksheet(SHEET_COMMANDES)
+                                    cell = ws.find(str(r.get('ID')))
+                                    row_no = cell.row
+                                except Exception:
+                                    # fallback : utiliser l'index + 2 (si l'ordre est stable)
+                                    row_no = i + 2
+                                update_cell(SHEET_COMMANDES, row_no, 'Statut', 'Validée')
+                                update_cell(SHEET_COMMANDES, row_no, 'Date_validation', str(datetime.now()))
+                                update_cell(SHEET_COMMANDES, row_no, 'Valide_par', st.session_state.user_email)
+                                st.success(f"Commande {r.get('ID')} validée.")
+                                st.session_state.command_validated = True
 
-        # État des ventes
-        with adv_tabs[3]:
-            st.subheader("État des ventes validées")
+            # si on a validé une commande, recharger et afficher l'état des ventes
+            if st.session_state.command_validated:
+                df_cmd2 = load_sheet_df(SHEET_COMMANDES)
+                st.markdown("**Récap dernières commandes validées (après validation)**")
+                if 'Statut' in df_cmd2.columns:
+                    df_valid = df_cmd2[df_cmd2['Statut'].astype(str).str.strip() == 'Validée']
+                    if not df_valid.empty:
+                        st.dataframe(df_valid[['ID','Date_commande','Code_POS','Produit','Quantite','Valide_par']], use_container_width=True)
+                st.session_state.command_validated = False
+
+        # ---------- État des ventes ----------
+        with tabs[3]:
+            st.markdown("**État des ventes (validées)**")
             df_cmd = load_sheet_df(SHEET_COMMANDES)
-            df_valid = df_cmd[df_cmd['Statut']=="Validée"]
-            if not df_valid.empty:
-                st.dataframe(df_valid[['ID','Date_commande','Code_POS','Produit','Quantite','Code_Vendeur','Statut','Date_validation','Valide_par']],use_container_width=True)
+            if 'Statut' in df_cmd.columns:
+                df_valid = df_cmd[df_cmd['Statut'].astype(str).str.strip() == 'Validée']
+                if df_valid.empty:
+                    st.info("Aucune vente validée.")
+                else:
+                    cols = [c for c in ['ID','Date_commande','Code_POS','Produit','Quantite','Code_Vendeur','Statut','Date_validation','Valide_par'] if c in df_valid.columns]
+                    st.dataframe(df_valid[cols], use_container_width=True)
             else:
-                st.write("Aucune vente validée.")
+                st.warning("La feuille Commandes_POS n'a pas la colonne 'Statut'.")
 
     # -----------------------------
-    # Espace Prévendeur
+    # Prévendeur
     # -----------------------------
-    elif st.session_state.user_role == "PreVendeur":
-        st.header("Espace Prévendeur — Prise de commandes POS")
-        pre_tabs = st.tabs(["Plan de visite","Saisie commande","Historique commandes"])
+    elif st.session_state.user_role == 'PreVendeur':
+        st.subheader("Espace Prévendeur — Prise de commandes POS")
+        tabs = st.tabs(["Plan de visite","Saisie commande","Historique commandes"])
 
         # Plan de visite
-        with pre_tabs[0]:
-            st.subheader("Plan de visite du jour")
-            df_list_pos['Date_Visite'] = pd.to_datetime(df_list_pos['Date_Visite'],dayfirst=True).dt.strftime('%Y-%m-%d')
-            today_str = datetime.now().strftime('%Y-%m-%d')
-            df_plan = df_list_pos[df_list_pos['Date_Visite']==today_str]
-            if not df_plan.empty:
-                st.dataframe(df_plan[['Code_POS','Nom_POS','Adresse','Wilaya']],use_container_width=True)
+        with tabs[0]:
+            st.markdown("**Plan de visite du jour**")
+            if df_list_pos.empty:
+                st.info("La table ListofPOS est vide ou introuvable.")
             else:
-                st.write("Aucun POS à visiter aujourd'hui.")
+                # normaliser date et filtrer par date du jour
+                if 'Date_Visite' in df_list_pos.columns:
+                    df_list_pos['Date_Visite'] = pd.to_datetime(df_list_pos['Date_Visite'], dayfirst=True, errors='coerce').dt.strftime('%Y-%m-%d')
+                    today = datetime.now().strftime('%Y-%m-%d')
+                    df_today = df_list_pos[df_list_pos['Date_Visite'] == today]
+                    if df_today.empty:
+                        st.info("Aucun POS à visiter aujourd'hui.")
+                    else:
+                        st.dataframe(df_today[['Code_POS','Nom_POS','Adresse','Wilaya']], use_container_width=True)
+                else:
+                    st.warning("La table ListofPOS n'a pas la colonne 'Date_Visite'.")
 
         # Saisie commande
-        with pre_tabs[1]:
-            st.subheader("Saisie d'une commande")
-            df_pos_today = df_list_pos[df_list_pos['Date_Visite']==datetime.now().strftime('%Y-%m-%d')]
-            pos_options = df_pos_today['Code_POS'].tolist() if not df_pos_today.empty else []
-            if pos_options:
+        with tabs[1]:
+            st.markdown("**Saisie d'une commande**")
+            # lister POS du jour
+            pos_options = []
+            if not df_list_pos.empty and 'Date_Visite' in df_list_pos.columns:
+                today = datetime.now().strftime('%Y-%m-%d')
+                df_today = df_list_pos[df_list_pos['Date_Visite'] == today]
+                if not df_today.empty and 'Code_POS' in df_today.columns:
+                    pos_options = df_today['Code_POS'].dropna().tolist()
+            if not pos_options:
+                st.info("Aucun POS prévu aujourd'hui (ou colonne Code_POS manquante).")
+            else:
                 code_pos = st.selectbox("POS à commander", pos_options)
-                produit_vente = st.selectbox("Produit vendu *", produits_dispo)
-                quantite_vente = st.number_input("Quantité vendue *", min_value=1, step=1)
+                produit_vente = st.selectbox("Produit *", produits_dispo) if produits_dispo else st.text_input("Produit *")
+                quantite_vente = st.number_input("Quantité vendue *", min_value=1, step=1, value=1)
                 if st.button("Ajouter commande"):
                     cmd_id = str(uuid.uuid4())
-                    row = [cmd_id,str(datetime.now()),code_pos,produit_vente,quantite_vente,st.session_state.user_code_vendeur,'En attente','','']
-                    append_row(SHEET_COMMANDES,row)
-                    st.session_state.commande_submitted = True
+                    row = [cmd_id, str(datetime.now()), code_pos, str(produit_vente), int(quantite_vente), st.session_state.user_code_vendeur, 'En attente', '', '']
+                    append_row(SHEET_COMMANDES, row)
                     st.success(f"Commande ajoutée avec ID {cmd_id}")
-            else:
-                st.write("Aucun POS à visiter aujourd'hui.")
+                    st.session_state.commande_submitted = True
+
+            # affichage immédiat si commande ajoutée
+            if st.session_state.commande_submitted:
+                df_cmd = load_sheet_df(SHEET_COMMANDES)
+                st.markdown("**Dernières commandes (après ajout)**")
+                if not df_cmd.empty:
+                    cols = [c for c in ['ID','Date_commande','Code_POS','Produit','Quantite','Code_Vendeur','Statut'] if c in df_cmd.columns]
+                    st.dataframe(df_cmd[cols].tail(10), use_container_width=True)
+                st.session_state.commande_submitted = False
 
         # Historique commandes
-        with pre_tabs[2]:
-            st.subheader("Historique des commandes")
+        with tabs[2]:
+            st.markdown("**Historique des commandes (votre code vendeur)**")
             df_cmd = load_sheet_df(SHEET_COMMANDES)
-            df_user_cmd = df_cmd[df_cmd['Code_Vendeur']==st.session_state.user_code_vendeur]
-            if not df_user_cmd.empty:
-                st.dataframe(df_user_cmd[['ID','Date_commande','Code_POS','Produit','Quantite','Statut','Date_validation','Valide_par']],use_container_width=True)
+            if df_cmd.empty:
+                st.info("Aucune commande enregistrée.")
             else:
-                st.write("Aucune commande enregistrée.")
+                if 'Code_Vendeur' in df_cmd.columns:
+                    df_user_cmd = df_cmd[df_cmd['Code_Vendeur'].astype(str).str.strip() == str(st.session_state.user_code_vendeur).strip()]
+                    if df_user_cmd.empty:
+                        st.info("Aucune commande pour votre code vendeur.")
+                    else:
+                        cols = [c for c in ['ID','Date_commande','Code_POS','Produit','Quantite','Statut','Date_validation','Valide_par'] if c in df_user_cmd.columns]
+                        st.dataframe(df_user_cmd[cols], use_container_width=True)
+                else:
+                    st.warning("La feuille Commandes_POS n'a pas la colonne 'Code_Vendeur'.")
+
+    else:
+        st.warning("Rôle non reconnu. Vérifie la feuille 'Utilisateurs'.")
+
+# -----------------------------
+# Fin
+# -----------------------------
