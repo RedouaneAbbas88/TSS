@@ -151,12 +151,11 @@ if st.sidebar.button("Se connecter"):
             if df_cmd_en_attente.empty:
                 st.write("Aucune commande en attente.")
             else:
-                # Affichage tableau complet
                 st.dataframe(df_cmd_en_attente, use_container_width=True)
 
                 cmd_id = st.selectbox("Sélectionner commande à valider", df_cmd_en_attente['ID'])
                 if st.button("Valider la commande"):
-                    row_index = df_cmd_en_attente[df_cmd_en_attente['ID'] == cmd_id].index[0]
+                    row_index = df_cmd[df_cmd['ID'] == cmd_id].index[0]
                     update_cell(SHEET_COMMANDES, row_index+2, 'Statut', "Validée")
                     update_cell(SHEET_COMMANDES, row_index+2, 'Date_validation', str(datetime.now()))
                     update_cell(SHEET_COMMANDES, row_index+2, 'Valide_par', email_input)
@@ -190,8 +189,8 @@ if st.sidebar.button("Se connecter"):
 
         # Saisie Commande
         elif pre_choice == "Saisie Commande":
-            st.subheader("Saisir une commande")
-            df_plan = df_list_pos[df_list_pos['Date_Visite']==datetime.now().strftime("%Y-%m-%d"))
+            today = datetime.now().strftime("%Y-%m-%d")
+            df_plan = df_list_pos[df_list_pos['Date_Visite']==today]
             if df_plan.empty:
                 st.write("Pas de visite aujourd'hui.")
             else:
@@ -200,7 +199,6 @@ if st.sidebar.button("Se connecter"):
                 quantite = st.number_input("Quantité", min_value=1, step=1)
                 if st.button("Enregistrer commande"):
                     cmd_id = str(uuid.uuid4())
-                    pos_data = df_plan[df_plan['Code_POS']==pos_select].iloc[0]
                     row = [
                         cmd_id,
                         str(datetime.now()),
