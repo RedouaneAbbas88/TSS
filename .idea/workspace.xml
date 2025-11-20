@@ -4,7 +4,9 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="f349971e-a150-43c6-b7e8-868a604e1abc" name="Changes" comment="" />
+    <list default="true" id="f349971e-a150-43c6-b7e8-868a604e1abc" name="Changes" comment="">
+      <change beforePath="$PROJECT_DIR$/TSS.py" beforeDir="false" afterPath="$PROJECT_DIR$/TSS.py" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
