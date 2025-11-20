@@ -183,7 +183,10 @@ elif user_role == 'PreVendeur':
         df_pos = df_list_pos.copy()
         if not df_pos.empty and user_code_vendeur:
             today_str = datetime.now().strftime('%Y-%m-%d')
-            df_pos['Date_Visite'] = pd.to_datetime(df_pos['Date_Visite'], format='%d/%m/%y').dt.strftime('%Y-%m-%d')
+            # Conversion sécurisée des dates
+            df_pos['Date_Visite'] = pd.to_datetime(df_pos['Date_Visite'], dayfirst=True, errors='coerce')
+            df_pos = df_pos.dropna(subset=['Date_Visite'])
+            df_pos['Date_Visite'] = df_pos['Date_Visite'].dt.strftime('%Y-%m-%d')
             df_today = df_pos[(df_pos['Date_Visite'] == today_str) & (df_pos['Code_Vendeur'] == user_code_vendeur)]
             st.dataframe(df_today[['Code_POS','Nom_POS','Adresse','Wilaya','Date_Visite']], use_container_width=True)
 
