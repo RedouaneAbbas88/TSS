@@ -3,182 +3,318 @@ import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
-from fpdf import FPDF
-import io
-from num2words import num2words
+import uuid
 
 # -----------------------------
-# ⚙️ Configuration Streamlit
+# Configuration Streamlit
 # -----------------------------
-st.set_page_config(page_title="TSS", layout="wide")
-st.title("📊 TSS")
+st.set_page_config(page_title="TSS - Distributeur", layout="wide")
+st.title("📊 TSS - Distribution (Distributeur → POS → Client)")
 
 # -----------------------------
-# 🔹 Connexion Google Sheets
+# Google Sheets / gspread
 # -----------------------------
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
 
-creds_dict = st.secrets["google"]
+creds_dict = st.secrets.get("google")
 creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
 client = gspread.authorize(creds)
 
-# Nouvelle ID de Google Sheet
+# ID de ta feuille Google (remplace si besoin)
 SPREADSHEET_ID = "1SN02jxpV2oyc3tWItY9c2Kc_UEXfqTdtQSL9WgGAi3w"
 
-try:
-    spreadsheet = client.open_by_key(SPREADSHEET_ID)
-    st.success("✅ Connexion réussie !")
-except Exception as e:
-    st.error(f"❌ Erreur de connexion : {e}")
-
-# -----------------------------
-# 🔹 Charger une feuille
-# -----------------------------
-@st.cache_data(ttl=10)
-def load_sheet(sheet_name):
+# utilitaires génériques pour Google Sheets
+@st.cache_data(ttl=30)
+def load_sheet_df(sheet_name):
     try:
-        sheet = spreadsheet.worksheet(sheet_name)
-        data = sheet.get_all_records()
+        sh = client.open_by_key(SPREADSHEET_ID)
+        worksheet = sh.worksheet(sheet_name)
+        data = worksheet.get_all_records()
         return pd.DataFrame(data)
     except Exception as e:
-        st.error(f"Erreur lors du chargement de la feuille '{sheet_name}': {e}")
+        st.error(f"Erreur chargement feuille {sheet_name}: {e}")
         return pd.DataFrame()
 
-# -----------------------------
-# 🔹 Données initiales
-# -----------------------------
-df_produits = load_sheet("Produits")
-produits_dispo = df_produits['Produit'].dropna().tolist() if not df_produits.empty else []
+
+def append_row(sheet_name, row_values):
+    sh = client.open_by_key(SPREADSHEET_ID)
+    worksheet = sh.worksheet(sheet_name)
+    worksheet.append_row(row_values)
+
+
+def find_row_index(sheet_name, column_name, value):
+    """Retourne l'index (1-based, en tenant compte de l'en-tête) de la première ligne où column_name == value
+    Si non trouvé retourne None"""
+    sh = client.open_by_key(SPREADSHEET_ID)
+    worksheet = sh.worksheet(sheet_name)
+    headers = worksheet.row_values(1)
+    try:
+        col_idx = headers.index(column_name) + 1
+    except ValueError:
+        return None
+    try:
+        cell = worksheet.find(str(value), in_column=col_idx)
+        return cell.row
+    except Exception:
+        return None
+
+
+def update_cell(sheet_name, row, col_name, new_value):
+    sh = client.open_by_key(SPREADSHEET_ID)
+    worksheet = sh.worksheet(sheet_name)
+    headers = worksheet.row_values(1)
+    try:
+        col_idx = headers.index(col_name) + 1
+    except ValueError:
+        return False
+    worksheet.update_cell(row, col_idx, new_value)
+    return True
 
 # -----------------------------
-# 🔹 Gestion des onglets
+# Chargement des tables nécessaires
 # -----------------------------
-tabs_labels = ["🛒 Ajouter Stock", "💰 Enregistrer Vente", "📦 État Stock", "📄 Historique Ventes", "💳 Paiements partiels"]
-if "active_tab" not in st.session_state:
-    st.session_state.active_tab = 0
-if "panier" not in st.session_state:
-    st.session_state.panier = []
+# Noms des feuilles (doivent exister exactement comme ci-dessous)
+SHEET_USERS = "Utilisateurs"
+SHEET_PRODUITS = "Produits"
+SHEET_LIST_POS = "ListofPOS"
+SHEET_LIST_VENDEUR = "ListofVendeur"
+SHEET_STOCK_DIST = "Stock_Distributeur"
+SHEET_STOCK_POS = "Stock_POS"
+SHEET_COMMANDES = "Commandes_POS"
+SHEET_VENTES = "Ventes_ClientFinal"
 
-tab_choice = st.radio("Choisir l'onglet", tabs_labels, index=st.session_state.active_tab)
-st.session_state.active_tab = tabs_labels.index(tab_choice)
+# Chargements initiaux (pandas)
+df_users = load_sheet_df(SHEET_USERS)
+df_produits = load_sheet_df(SHEET_PRODUITS)
+df_list_pos = load_sheet_df(SHEET_LIST_POS)
+df_list_vendeur = load_sheet_df(SHEET_LIST_VENDEUR)
 
-# -----------------------------
-# Onglet 1 : Ajouter Stock
-# -----------------------------
-if tab_choice == "🛒 Ajouter Stock":
-    st.header("Ajouter du stock")
-    with st.form("form_stock"):
-        produit_stock = st.selectbox("Produit *", produits_dispo)
-        prix_achat = float(df_produits.loc[df_produits['Produit'] == produit_stock, 'Prix unitaire'].values[0]) if not df_produits.empty else 0.0
-        quantite_stock = st.number_input("Quantité achetée", min_value=1, step=1)
-        if st.form_submit_button("Ajouter au stock"):
-            row = [str(datetime.now()), produit_stock, quantite_stock, prix_achat]
-            spreadsheet.worksheet("Stock").append_row(row)
-            st.success(f"{quantite_stock} {produit_stock} ajouté(s) au stock.")
+# produits dispo
+produits_dispo = df_produits['Nom Produit'].dropna().tolist() if not df_produits.empty else []
 
 # -----------------------------
-# Onglet 2 : Enregistrer Vente
+# Authentification simple (selectbox)
 # -----------------------------
-elif tab_choice == "💰 Enregistrer Vente":
-    st.header("Enregistrer une vente multi-produits")
+st.sidebar.header("Connexion")
+if df_users.empty:
+    st.sidebar.error("La feuille 'Utilisateurs' est vide ou introuvable. Merci de la configurer.")
+    st.stop()
 
-    produit_vente = st.selectbox("Produit vendu *", produits_dispo)
-    if produit_vente:
-        prix_unitaire = float(df_produits.loc[df_produits['Produit'] == produit_vente, 'Prix unitaire'].values[0])
-    else:
-        prix_unitaire = 0.0
+user_email = st.sidebar.selectbox("Sélectionnez votre email", df_users['Email'].tolist())
+user_row = df_users[df_users['Email'] == user_email].iloc[0]
+user_name = user_row.get('Nom', 'Utilisateur')
+user_role = user_row.get('Role', 'POS')
+user_code_pos = user_row.get('Code_POS', '')
+user_code_vendeur = user_row.get('Code_Vendeur', '')
 
-    quantite_vente = st.number_input("Quantité vendue *", min_value=1, step=1)
-    total_ht = prix_unitaire * quantite_vente
-    total_ttc = int(round(total_ht * 1.19, 0))
-    st.write(f"Prix unitaire : {prix_unitaire} DA | 💰 Total TTC : {total_ttc} DA")
+st.sidebar.markdown(f"**{user_name}** — {user_role}")
 
-    client_nom = st.text_input("Nom du client *")
-    client_email = st.text_input("Email du client")
-    client_tel = st.text_input("Téléphone du client *")
-    client_rc = st.text_input("RC du client")
-    client_nif = st.text_input("NIF du client")
-    client_art = st.text_input("ART du client")
-    client_adresse = st.text_input("Adresse du client")
+# -----------------------------
+# Helper: calculer stock courant (distributeur ou POS)
+# -----------------------------
+@st.cache_data(ttl=10)
+def compute_stock_distributeur():
+    df = load_sheet_df(SHEET_STOCK_DIST)
+    if df.empty:
+        return pd.DataFrame(columns=['Produit', 'Stock'])
+    df['Quantite_entree'] = pd.to_numeric(df['Quantite_entree'].fillna(0))
+    df['Quantite_sortie'] = pd.to_numeric(df['Quantite_sortie'].fillna(0))
+    grp = df.groupby('Produit').agg({'Quantite_entree':'sum','Quantite_sortie':'sum'}).reset_index()
+    grp['Stock'] = grp['Quantite_entree'] - grp['Quantite_sortie']
+    return grp[['Produit','Stock']]
 
-    montant_paye = st.number_input("Montant payé par le client", min_value=0, max_value=total_ttc, value=0, step=1)
-    reste_a_payer = total_ttc - montant_paye
-    st.write(f"Reste à payer : {reste_a_payer} DA")
 
-    generer_facture = st.checkbox("Générer une facture PDF")
+@st.cache_data(ttl=10)
+def compute_stock_pos(code_pos=None):
+    df = load_sheet_df(SHEET_STOCK_POS)
+    if df.empty:
+        return pd.DataFrame(columns=['Code_POS','Produit','Stock'])
+    df['Quantite_entree'] = pd.to_numeric(df['Quantite_entree'].fillna(0))
+    df['Quantite_sortie'] = pd.to_numeric(df['Quantite_sortie'].fillna(0))
+    grp = df.groupby(['Code_POS','Produit']).agg({'Quantite_entree':'sum','Quantite_sortie':'sum'}).reset_index()
+    grp['Stock'] = grp['Quantite_entree'] - grp['Quantite_sortie']
+    if code_pos:
+        grp = grp[grp['Code_POS'] == code_pos]
+    return grp[['Code_POS','Produit','Stock']]
 
-    if st.button("Ajouter au panier"):
-        if not produit_vente or quantite_vente <= 0 or not client_nom.strip() or not client_tel.strip():
-            st.error("⚠️ Merci de remplir tous les champs obligatoires.")
+# -----------------------------
+# Interface selon rôle
+# -----------------------------
+if user_role == 'ADV':
+    st.header("Espace ADV — Gestion stock & validation commandes")
+
+    tabs = st.tabs(["📥 Ajouter stock distributeur","📋 Commandes en attente","📦 État stock distributeur"])
+
+    # Onglet 1: Ajouter stock distributeur
+    with tabs[0]:
+        st.subheader("Ajouter entrée stock distributeur")
+        col1,col2 = st.columns([2,1])
+        with col1:
+            produit = st.selectbox("Produit", produits_dispo)
+            qty = st.number_input("Quantité entrée", min_value=1, step=1, value=1)
+            motif = st.text_input("Motif (ex: Achat fournisseur)")
+        with col2:
+            if st.button("Ajouter au stock (Distributeur)"):
+                today = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                ref = str(uuid.uuid4())
+                append_row(SHEET_STOCK_DIST, [today, produit, qty, 0, motif, '', ref])
+                st.success(f"+{qty} {produit} ajouté au stock distributeur.")
+                compute_stock_distributeur.clear()
+
+    # Onglet 2: Commandes en attente
+    with tabs[1]:
+        st.subheader("Commandes POS — En attente")
+        df_cmd = load_sheet_df(SHEET_COMMANDES)
+        if df_cmd.empty:
+            st.info("Aucune commande enregistrée.")
         else:
-            st.session_state.panier.append({
-                "Produit": produit_vente,
-                "Quantité": quantite_vente,
-                "Prix unitaire": prix_unitaire,
-                "Total HT": total_ht,
-                "Total TTC": total_ttc,
-                "Montant payé": montant_paye,
-                "Reste à payer": reste_a_payer,
-                "Client Nom": client_nom,
-                "Client Email": client_email,
-                "Client Tel": client_tel,
-                "Client RC": client_rc,
-                "Client NIF": client_nif,
-                "Client ART": client_art,
-                "Client Adresse": client_adresse
-            })
-            st.success(f"{quantite_vente} x {produit_vente} ajouté(s) au panier.")
+            df_pending = df_cmd[df_cmd['Statut'] == 'En attente']
+            if df_pending.empty:
+                st.info("Aucune commande en attente.")
+            else:
+                st.dataframe(df_pending[['ID_Commande','Date_commande','Code_POS','Produit','Quantite','Code_Vendeur']])
+                sel = st.text_input("ID_Commande à valider (copier-coller)")
+                if st.button("Valider la commande sélectionnée"):
+                    if not sel:
+                        st.error("Merci de renseigner l'ID de la commande à valider.")
+                    else:
+                        row_idx = find_row_index(SHEET_COMMANDES, 'ID_Commande', sel)
+                        if not row_idx:
+                            st.error("Commande non trouvée.")
+                        else:
+                            # lire la commande
+                            df_all = load_sheet_df(SHEET_COMMANDES)
+                            cmd = df_all[df_all['ID_Commande'] == sel].iloc[0]
+                            produit = cmd['Produit']
+                            quantite = int(cmd['Quantite'])
+                            code_pos = cmd['Code_POS']
+                            today = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                            ref = str(uuid.uuid4())
+                            # 1) sortie stock distributeur
+                            append_row(SHEET_STOCK_DIST, [today, produit, 0, quantite, 'Livraison POS', code_pos, ref])
+                            # 2) entree stock POS
+                            append_row(SHEET_STOCK_POS, [today, code_pos, produit, quantite, 0, 'Distributeur', ref])
+                            # 3) mettre à jour la commande
+                            update_cell(SHEET_COMMANDES, row_idx, 'Statut', 'Livré')
+                            update_cell(SHEET_COMMANDES, row_idx, 'Date_validation', today)
+                            update_cell(SHEET_COMMANDES, row_idx, 'Valide_par', user_email)
+                            st.success(f"Commande {sel} validée et stock mis à jour.")
+                            compute_stock_distributeur.clear()
+                            compute_stock_pos.clear()
 
-    if st.session_state.panier:
-        st.subheader("Panier actuel")
-        df_panier = pd.DataFrame(st.session_state.panier)
-        st.dataframe(df_panier[['Produit', 'Quantité', 'Prix unitaire', 'Total HT', 'Total TTC', 'Montant payé', 'Reste à payer']], use_container_width=True, hide_index=True)
+    # Onglet 3: Etat stock distributeur
+    with tabs[2]:
+        st.subheader("État du stock distributeur")
+        st.dataframe(compute_stock_distributeur(), use_container_width=True)
 
-# -----------------------------
-# Onglet 3 : État Stock
-# -----------------------------
-elif tab_choice == "📦 État Stock":
-    st.header("État du stock")
-    df_stock = load_sheet("Stock")
-    df_ventes = load_sheet("Ventes")
-    if not df_stock.empty:
-        stock_reel = df_stock.groupby("Produit")["Quantité"].sum().reset_index()
-        if not df_ventes.empty:
-            ventes_group = df_ventes.groupby("Produit")["Quantité"].sum().reset_index()
-            stock_reel = stock_reel.merge(ventes_group, on="Produit", how="left", suffixes=('', '_vendu'))
-            stock_reel['Quantité_vendu'] = stock_reel['Quantité_vendu'].fillna(0)
-            stock_reel['Stock restant'] = stock_reel['Quantité'] - stock_reel['Quantité_vendu']
+
+elif user_role == 'PreVendeur' or user_role == 'PreVendeur'.lower():
+    st.header("Espace Prévendeur — Prise de commandes POS")
+
+    tabs = st.tabs(["📅 Plan de visite","📝 Saisir commande","📜 Historique commandes"])
+
+    # Plan de visite
+    with tabs[0]:
+        st.subheader("Plan de visite du jour")
+        df_pos = df_list_pos.copy()
+        if df_pos.empty:
+            st.info("La table ListofPOS est vide.")
         else:
-            stock_reel['Stock restant'] = stock_reel['Quantité']
-        st.dataframe(stock_reel[['Produit', 'Stock restant']], use_container_width=True)
-    else:
-        st.write("Aucun stock enregistré.")
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            df_today = df_pos[df_pos['Date_Visite'] == today_str]
+            # filtrer par vendeur
+            if 'Code_Vendeur' in df_pos.columns and user_code_vendeur:
+                df_today = df_today[df_today['Code_Vendeur'] == user_code_vendeur]
+            st.dataframe(df_today[['Code_POS','Nom_POS','Adresse','Wilaya','Date_Visite']], use_container_width=True)
 
-# -----------------------------
-# Onglet 4 : Historique Ventes
-# -----------------------------
-elif tab_choice == "📄 Historique Ventes":
-    st.header("Historique des ventes")
-    df_ventes = load_sheet("Ventes")
-    if not df_ventes.empty:
-        st.dataframe(df_ventes, use_container_width=True)
-    else:
-        st.write("Aucune vente enregistrée.")
+    # Saisir commande
+    with tabs[1]:
+        st.subheader("Enregistrer une commande POS (En attente)")
+        code_pos = st.selectbox("Code POS", df_list_pos['Code_POS'].unique().tolist() if not df_list_pos.empty else [])
+        produit = st.selectbox("Produit", produits_dispo)
+        quantite = st.number_input("Quantité", min_value=1, step=1, value=1)
+        if st.button("Enregistrer la commande"):
+            id_cmd = str(uuid.uuid4())
+            today = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            append_row(SHEET_COMMANDES, [id_cmd, today, code_pos, produit, quantite, user_code_vendeur or user_email, 'En attente', '', ''])
+            st.success(f"Commande {id_cmd} enregistrée (En attente).")
 
-# -----------------------------
-# Onglet 5 : Paiements partiels
-# -----------------------------
-elif tab_choice == "💳 Paiements partiels":
-    st.header("État des paiements partiels")
-    df_ventes = load_sheet("Ventes")
-    if not df_ventes.empty:
-        df_partiels = df_ventes[df_ventes["Reste à payer"] > 0]
-        if not df_partiels.empty:
-            st.dataframe(df_partiels[["Produit", "Nom", "Téléphone", "Total TTC", "Montant payé", "Reste à payer"]], use_container_width=True)
+    # Historique commandes
+    with tabs[2]:
+        st.subheader("Historique des commandes saisies")
+        df_cmd = load_sheet_df(SHEET_COMMANDES)
+        if df_cmd.empty:
+            st.info("Aucune commande enregistrée.")
         else:
-            st.write("Aucun paiement partiel en attente.")
-    else:
-        st.write("Aucune vente enregistrée.")
+            # filtrer par vendeur
+            df_my = df_cmd[df_cmd['Code_Vendeur'] == (user_code_vendeur or user_email)]
+            st.dataframe(df_my[['ID_Commande','Date_commande','Code_POS','Produit','Quantite','Statut']])
+
+
+elif user_role == 'POS' or user_role == 'Pos' or user_role == 'pos':
+    st.header("Espace POS — Ventes au client final & stock POS")
+
+    tabs = st.tabs(["📦 Stock POS","💰 Enregistrer vente client","📄 Historique ventes"])
+
+    # Stock POS
+    with tabs[0]:
+        st.subheader(f"Stock — {user_code_pos}")
+        stock = compute_stock_pos(user_code_pos)
+        if stock.empty:
+            st.info("Aucun stock pour ce POS.")
+        else:
+            st.dataframe(stock, use_container_width=True)
+
+    # Enregistrer vente client
+    with tabs[1]:
+        st.subheader("Enregistrer une vente au client final")
+        produit = st.selectbox("Produit", sorted(stock['Produit'].unique().tolist()) if not stock.empty else produits_dispo)
+        quantite = st.number_input("Quantité vendue", min_value=1, step=1, value=1)
+        # prix: chercher dans produits
+        prix_unitaire = 0
+        if not df_produits.empty and produit in df_produits['Nom Produit'].values:
+            prix_unitaire = float(df_produits[df_produits['Nom Produit'] == produit]['Prix POS'].values[0])
+        total_ttc = int(round(prix_unitaire * quantite * 1.19,0)) if prix_unitaire else 0
+        nom_client = st.text_input("Nom du client")
+        tel_client = st.text_input("Téléphone client")
+        montant_paye = st.number_input("Montant payé", min_value=0, max_value=total_ttc if total_ttc else 9999999, value=0, step=1)
+        if st.button("Enregistrer la vente"):
+            # vérifier stock disponible
+            stock_df = compute_stock_pos(user_code_pos)
+            available = 0
+            if not stock_df.empty and produit in stock_df['Produit'].values:
+                available = int(stock_df[stock_df['Produit']==produit]['Stock'].values[0])
+            if available < quantite:
+                st.error(f"Stock insuffisant pour {produit}. Disponible: {available}")
+            else:
+                today = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                ref = str(uuid.uuid4())
+                # 1) enregistrer vente
+                append_row(SHEET_VENTES, [today, user_code_pos, produit, quantite, prix_unitaire, total_ttc, montant_paye, total_ttc - montant_paye, nom_client, tel_client, '', ref])
+                # 2) mettre une ligne de sortie dans Stock_POS
+                append_row(SHEET_STOCK_POS, [today, user_code_pos, produit, 0, quantite, 'Vente client final', ref])
+                st.success("Vente enregistrée et stock mis à jour.")
+                compute_stock_pos.clear()
+
+    # Historique ventes
+    with tabs[2]:
+        st.subheader("Historique des ventes du POS")
+        df_ventes = load_sheet_df(SHEET_VENTES)
+        if df_ventes.empty:
+            st.info("Aucune vente enregistrée.")
+        else:
+            df_my = df_ventes[df_ventes['Code_POS'] == user_code_pos]
+            st.dataframe(df_my[['Date','Produit','Quantite','Total_TTC','Montant_paye','Reste_a_payer','Nom_Client','Tel_Client']])
+
+else:
+    st.warning("Rôle non reconnu. Vérifie la feuille Utilisateurs.")
+
+# -----------------------------
+# NOTE: Améliorations futures
+# - Ajouter vérification de permissions plus stricte
+# - Générer PDF facture
+# - Ajouter logs et tableaux de bord Power BI
+# -----------------------------
