@@ -10,8 +10,8 @@ from num2words import num2words
 # -----------------------------
 # ⚙️ Configuration Streamlit
 # -----------------------------
-st.set_page_config(page_title="Showroom Stock & Vente", layout="wide")
-st.title("📊 Gestion Showroom")
+st.set_page_config(page_title="TSS", layout="wide")
+st.title("📊 TSS")
 
 # -----------------------------
 # 🔹 Connexion Google Sheets
@@ -30,9 +30,9 @@ SPREADSHEET_ID = "1SN02jxpV2oyc3tWItY9c2Kc_UEXfqTdtQSL9WgGAi3w"
 
 try:
     spreadsheet = client.open_by_key(SPREADSHEET_ID)
-    st.success("✅ Connexion Google Sheets réussie !")
+    st.success("✅ Connexion réussie !")
 except Exception as e:
-    st.error(f"❌ Erreur de connexion Google Sheets : {e}")
+    st.error(f"❌ Erreur de connexion : {e}")
 
 # -----------------------------
 # 🔹 Charger une feuille
