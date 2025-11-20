@@ -22,9 +22,11 @@ SCOPES = [
 creds_dict = st.secrets.get("google")
 creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
 client = gspread.authorize(creds)
-
 SPREADSHEET_ID = "1SN02jxpV2oyc3tWItY9c2Kc_UEXfqTdtQSL9WgGAi3w"
 
+# -----------------------------
+# Fonctions utilitaires
+# -----------------------------
 @st.cache_data(ttl=30)
 def load_sheet_df(sheet_name):
     try:
@@ -53,7 +55,7 @@ def update_cell(sheet_name, row, col_name, new_value):
     return True
 
 # -----------------------------
-# Google Sheet tables
+# Noms des feuilles
 # -----------------------------
 SHEET_USERS = "Utilisateurs"
 SHEET_PRODUITS = "Produits"
@@ -62,11 +64,16 @@ SHEET_LIST_VENDEUR = "ListofVendeur"
 SHEET_STOCK_DIST = "Stock_Distributeur"
 SHEET_COMMANDES = "Commandes_POS"
 
-# Chargements initiaux
+# -----------------------------
+# Chargement des tables
+# -----------------------------
 df_users = load_sheet_df(SHEET_USERS)
 df_produits = load_sheet_df(SHEET_PRODUITS)
 df_list_pos = load_sheet_df(SHEET_LIST_POS)
 df_list_vendeur = load_sheet_df(SHEET_LIST_VENDEUR)
+df_stock = load_sheet_df(SHEET_STOCK_DIST)
+df_commandes = load_sheet_df(SHEET_COMMANDES)
+
 produits_dispo = df_produits['Nom Produit'].dropna().tolist() if not df_produits.empty else []
 
 # -----------------------------
@@ -75,140 +82,141 @@ produits_dispo = df_produits['Nom Produit'].dropna().tolist() if not df_produits
 st.sidebar.header("Connexion")
 email_input = st.sidebar.text_input("Email")
 password_input = st.sidebar.text_input("Mot de passe", type="password")
+login_button = st.sidebar.button("Se connecter")
 
-if st.sidebar.button("Se connecter"):
-    if df_users.empty:
-        st.sidebar.error("La feuille 'Utilisateurs' est vide.")
-        st.stop()
+if 'user_role' not in st.session_state:
+    st.session_state.user_role = None
 
+if login_button:
     user_row = df_users[df_users['Email'] == email_input]
     if user_row.empty:
-        st.sidebar.error("Email non reconnu.")
-        st.stop()
+        st.sidebar.error("Email non reconnu")
+    else:
+        user_row = user_row.iloc[0]
+        if password_input != user_row['Password']:
+            st.sidebar.error("Mot de passe incorrect")
+        else:
+            st.session_state.user_role = user_row['Role']
+            st.session_state.user_name = user_row['Nom']
+            st.session_state.user_code_vendeur = user_row.get('Code_Vendeur', '')
+            st.sidebar.success(f"Connecté : {st.session_state.user_name} — {st.session_state.user_role}")
 
-    user_row = user_row.iloc[0]
+# -----------------------------
+# Vérification connexion
+# -----------------------------
+if st.session_state.user_role is None:
+    st.stop()
 
-    # Mot de passe en clair pour test
-    if user_row['Password'] != password_input:
-        st.sidebar.error("Mot de passe incorrect.")
-        st.stop()
+# -----------------------------
+# ADV Interface
+# -----------------------------
+if st.session_state.user_role == 'ADV':
+    st.header("Espace ADV — Gestion stock & commandes")
 
-    user_name = user_row.get('Nom', 'Utilisateur')
-    user_role = user_row.get('Role', 'PreVendeur')
-    user_code_vendeur = user_row.get('Code_Vendeur', '')
+    adv_tabs = ["Ajouter Stock", "État Stock", "Commandes à valider", "État Ventes"]
+    adv_choice = st.radio("Onglet", adv_tabs)
 
-    st.sidebar.success(f"Connecté : {user_name} — {user_role}")
-
-    # -----------------------------
-    # Helper: calculer stock courant distributeur
-    # -----------------------------
-    @st.cache_data(ttl=10)
-    def compute_stock_distributeur():
-        df = load_sheet_df(SHEET_STOCK_DIST)
-        if df.empty:
-            return pd.DataFrame(columns=['Produit', 'Stock'])
-        df['Quantite_entree'] = pd.to_numeric(df['Quantite_entree'].fillna(0))
-        df['Quantite_sortie'] = pd.to_numeric(df['Quantite_sortie'].fillna(0))
-        grp = df.groupby('Produit').agg({'Quantite_entree':'sum','Quantite_sortie':'sum'}).reset_index()
-        grp['Stock'] = grp['Quantite_entree'] - grp['Quantite_sortie']
-        return grp[['Produit','Stock']]
-
-    # -----------------------------
-    # Interface ADV
-    # -----------------------------
-    if user_role == 'ADV':
-        st.header("Espace ADV — Gestion stock & validation commandes")
-
-        adv_tabs = ["Ajouter Stock", "État Stock", "Commandes à valider", "État Ventes"]
-        adv_choice = st.radio("Sélectionner onglet ADV", adv_tabs)
-
-        # Onglet Ajouter Stock
-        if adv_choice == "Ajouter Stock":
-            st.subheader("Ajouter du stock")
-            with st.form("form_stock"):
-                produit_stock = st.selectbox("Produit *", produits_dispo)
+    # Ajouter Stock
+    if adv_choice == "Ajouter Stock":
+        st.subheader("Ajouter du stock")
+        with st.form("form_stock"):
+            produit_stock = st.selectbox("Produit *", produits_dispo)
+            if not df_produits.empty:
                 prix_achat = float(df_produits.loc[df_produits['Nom Produit']==produit_stock, 'Prix unitaire'].values[0])
-                quantite_stock = st.number_input("Quantité achetée", min_value=1, step=1)
-                if st.form_submit_button("Ajouter au stock"):
-                    row = [str(datetime.now()), produit_stock, quantite_stock, prix_achat]
-                    append_row(SHEET_STOCK_DIST, row)
-                    st.success(f"{quantite_stock} {produit_stock} ajouté(s) au stock.")
-
-        # Onglet État Stock
-        elif adv_choice == "État Stock":
-            st.subheader("État Stock Distributeur")
-            df_stock = compute_stock_distributeur()
-            if not df_stock.empty:
-                st.dataframe(df_stock, use_container_width=True)
             else:
-                st.write("Aucun stock enregistré.")
+                prix_achat = 0.0
+            quantite_stock = st.number_input("Quantité achetée", min_value=1, step=1)
+            submit_stock = st.form_submit_button("Ajouter au stock")
+            if submit_stock:
+                row = [str(datetime.now()), produit_stock, quantite_stock, prix_achat]
+                append_row(SHEET_STOCK_DIST, row)
+                st.success(f"{quantite_stock} x {produit_stock} ajouté(s) au stock")
 
-        # Onglet Commandes à valider
-        elif adv_choice == "Commandes à valider":
-            st.subheader("Commandes à valider")
-            df_cmd = load_sheet_df(SHEET_COMMANDES)
-            df_cmd_en_attente = df_cmd[df_cmd['Statut'] == "En attente"]
-            if df_cmd_en_attente.empty:
-                st.write("Aucune commande en attente.")
+    # État Stock
+    elif adv_choice == "État Stock":
+        st.subheader("État du stock")
+        df_stock = load_sheet_df(SHEET_STOCK_DIST)
+        if not df_stock.empty:
+            df_stock['Quantite_entree'] = pd.to_numeric(df_stock['Quantite_entree'].fillna(0))
+            df_stock['Quantite_sortie'] = pd.to_numeric(df_stock['Quantite_sortie'].fillna(0))
+            stock_calc = df_stock.groupby('Produit').agg({'Quantite_entree':'sum','Quantite_sortie':'sum'}).reset_index()
+            stock_calc['Stock'] = stock_calc['Quantite_entree'] - stock_calc['Quantite_sortie']
+            st.dataframe(stock_calc[['Produit','Stock']], use_container_width=True)
+        else:
+            st.write("Aucun stock enregistré.")
+
+    # Commandes à valider
+    elif adv_choice == "Commandes à valider":
+        st.subheader("Commandes à valider")
+        df_commandes = load_sheet_df(SHEET_COMMANDES)
+        df_attente = df_commandes[df_commandes['Statut']=="En attente"]
+        if df_attente.empty:
+            st.info("Aucune commande en attente")
+        else:
+            st.dataframe(df_attente[['ID','Date_commande','Code_POS','Produit','Quantite','Code_Vendeur']], use_container_width=True)
+            with st.form("form_valider_commande"):
+                cmd_id = st.selectbox("Sélectionner commande à valider", df_attente['ID'])
+                submit_valide = st.form_submit_button("Valider la commande")
+                if submit_valide:
+                    row_index = df_commandes.index[df_commandes['ID']==cmd_id][0] + 2  # +2 pour gspread
+                    update_cell(SHEET_COMMANDES, row_index, 'Statut', 'Validée')
+                    update_cell(SHEET_COMMANDES, row_index, 'Date_validation', str(datetime.now()))
+                    update_cell(SHEET_COMMANDES, row_index, 'Valide_par', st.session_state.user_name)
+                    st.success("Commande validée avec succès")
+                    st.experimental_rerun()
+
+    # État Ventes
+    elif adv_choice == "État Ventes":
+        st.subheader("État des ventes")
+        df_commandes = load_sheet_df(SHEET_COMMANDES)
+        if not df_commandes.empty:
+            st.dataframe(df_commandes, use_container_width=True)
+        else:
+            st.write("Aucune commande enregistrée.")
+
+# -----------------------------
+# Prévendeur Interface
+# -----------------------------
+elif st.session_state.user_role == 'PreVendeur':
+    st.header("Espace Prévendeur — Prise de commandes POS")
+
+    pre_tabs = ["Plan de visite", "Saisie commande", "Historique commandes"]
+    pre_choice = st.radio("Onglet", pre_tabs, horizontal=True)
+
+    # Filtrer plan de visite du jour
+    df_list_pos['Date_Visite'] = pd.to_datetime(df_list_pos['Date_Visite'], format="%d/%m/%y").dt.strftime("%Y-%m-%d")
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    df_today = df_list_pos[(df_list_pos['Code_Vendeur']==st.session_state.user_code_vendeur) & (df_list_pos['Date_Visite']==today_str)]
+
+    if pre_choice == "Plan de visite":
+        st.subheader("Plan de visite du jour")
+        if df_today.empty:
+            st.write("Aucun POS à visiter aujourd'hui")
+        else:
+            st.dataframe(df_today[['Code_POS','Nom_POS','Adresse','Wilaya']], use_container_width=True)
+
+    elif pre_choice == "Saisie commande":
+        st.subheader("Saisie d'une commande")
+        with st.form("form_commande"):
+            if df_today.empty:
+                st.info("Pas de POS prévu aujourd'hui")
             else:
-                st.dataframe(df_cmd_en_attente, use_container_width=True)
-
-                cmd_id = st.selectbox("Sélectionner commande à valider", df_cmd_en_attente['ID'])
-                if st.button("Valider la commande"):
-                    row_index = df_cmd[df_cmd['ID'] == cmd_id].index[0]
-                    update_cell(SHEET_COMMANDES, row_index+2, 'Statut', "Validée")
-                    update_cell(SHEET_COMMANDES, row_index+2, 'Date_validation', str(datetime.now()))
-                    update_cell(SHEET_COMMANDES, row_index+2, 'Valide_par', email_input)
-                    st.success("Commande validée !")
-
-        # Onglet État Ventes
-        elif adv_choice == "État Ventes":
-            st.subheader("État des ventes")
-            df_cmd = load_sheet_df(SHEET_COMMANDES)
-            if not df_cmd.empty:
-                st.dataframe(df_cmd, use_container_width=True)
-            else:
-                st.write("Aucune vente enregistrée.")
-
-    # -----------------------------
-    # Interface Prévendeur
-    # -----------------------------
-    elif user_role == 'PreVendeur':
-        st.header("Espace Prévendeur — Prise de commandes POS")
-        pre_tabs = ["Plan de visite", "Saisie Commande"]
-        pre_choice = st.radio("Sélectionner onglet Prévendeur", pre_tabs)
-
-        # Plan de visite
-        if pre_choice == "Plan de visite":
-            today = datetime.now().strftime("%Y-%m-%d")
-            df_plan = df_list_pos[df_list_pos['Date_Visite']==today]
-            if df_plan.empty:
-                st.write("Pas de visite prévue aujourd'hui.")
-            else:
-                st.dataframe(df_plan[['Code_POS','Nom_POS','Adresse','Wilaya']], use_container_width=True)
-
-        # Saisie Commande
-        elif pre_choice == "Saisie Commande":
-            today = datetime.now().strftime("%Y-%m-%d")
-            df_plan = df_list_pos[df_list_pos['Date_Visite']==today]
-            if df_plan.empty:
-                st.write("Pas de visite aujourd'hui.")
-            else:
-                pos_select = st.selectbox("Sélectionner POS", df_plan['Code_POS'])
-                produit_select = st.selectbox("Produit", produits_dispo)
+                code_pos = st.selectbox("Sélectionner POS", df_today['Code_POS'])
+                produit = st.selectbox("Produit", produits_dispo)
                 quantite = st.number_input("Quantité", min_value=1, step=1)
-                if st.button("Enregistrer commande"):
-                    cmd_id = str(uuid.uuid4())
-                    row = [
-                        cmd_id,
-                        str(datetime.now()),
-                        pos_select,
-                        produit_select,
-                        quantite,
-                        user_code_vendeur,
-                        "En attente",
-                        "",  # Date_validation
-                        ""   # Valide_par
-                    ]
+                submit_commande = st.form_submit_button("Enregistrer la commande")
+                if submit_commande:
+                    row = [str(uuid.uuid4()), str(datetime.now()), code_pos, produit, quantite,
+                           st.session_state.user_code_vendeur, "En attente","",""]
                     append_row(SHEET_COMMANDES, row)
-                    st.success("Commande enregistrée !")
+                    st.success("Commande enregistrée")
+                    st.experimental_rerun()
+
+    elif pre_choice == "Historique commandes":
+        st.subheader("Historique des commandes")
+        df_commandes = load_sheet_df(SHEET_COMMANDES)
+        df_user = df_commandes[df_commandes['Code_Vendeur']==st.session_state.user_code_vendeur]
+        if df_user.empty:
+            st.write("Aucune commande enregistrée")
+        else:
+            st.dataframe(df_user, use_container_width=True)
