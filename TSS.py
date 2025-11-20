@@ -193,26 +193,30 @@ if st.sidebar.button("Se connecter"):
             (df_list_pos['Date_Visite'] == today)
         ]
 
-        # Affichage côte à côte : Plan visite + saisie commande
-        col1, col2 = st.columns(2)
+        # Onglets horizontaux
+        tabs_prev = st.tabs(["📅 Plan de visite", "📝 Nouvelle commande", "📄 Historique commandes"])
 
-        with col1:
+        # ---------------- Onglet 1 : Plan de visite ----------------
+        with tabs_prev[0]:
             st.subheader("Plan de visite du jour")
             if df_today.empty:
                 st.warning("Aucun POS prévu aujourd'hui.")
             else:
                 st.dataframe(df_today)
 
-        with col2:
-            st.subheader("Nouvelle commande POS")
-            if not df_today.empty:
+        # ---------------- Onglet 2 : Nouvelle commande ----------------
+        with tabs_prev[1]:
+            st.subheader("Saisie de nouvelle commande POS")
+            if df_today.empty:
+                st.warning("Aucun POS prévu aujourd'hui pour saisir une commande.")
+            else:
                 pos_select = st.selectbox("Sélectionner POS", df_today['Nom_POS'])
                 produit = st.selectbox("Produit", produits_dispo)
                 qte = st.number_input("Quantité", min_value=1, step=1)
 
                 if st.button("Enregistrer Commande"):
                     append_row(SHEET_COMMANDES, [
-                        str(uuid.uuid4()),
+                        str(uuid.uuid4()),   # ID unique
                         pos_select,
                         produit,
                         qte,
@@ -222,11 +226,15 @@ if st.sidebar.button("Se connecter"):
                     ])
                     st.success("Commande enregistrée.")
 
-        # Historique commandes
-        st.subheader("Historique commandes")
-        df_cmd = load_sheet_df(SHEET_COMMANDES)
-        df_cmd = df_cmd[df_cmd['Code_Vendeur'] == user_code_vendeur]
-        st.dataframe(df_cmd)
+        # ---------------- Onglet 3 : Historique ----------------
+        with tabs_prev[2]:
+            st.subheader("Historique commandes")
+            df_cmd = load_sheet_df(SHEET_COMMANDES)
+            df_cmd = df_cmd[df_cmd['Code_Vendeur'] == user_code_vendeur]
+            if df_cmd.empty:
+                st.info("Aucune commande enregistrée.")
+            else:
+                st.dataframe(df_cmd)
 
     else:
         st.warning("Rôle non reconnu. Vérifie la feuille Utilisateurs.")
