@@ -6,26 +6,22 @@ from datetime import datetime
 import uuid
 
 # -----------------------------
-# Configuration Streamlit
+# CONFIG
 # -----------------------------
 st.set_page_config(page_title="TSS - Distribution", layout="wide")
 
-# -----------------------------
-# Google Sheets
-# -----------------------------
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
 
-creds_dict = st.secrets.get("google")
-creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+creds = Credentials.from_service_account_info(st.secrets["google"], scopes=SCOPES)
 client = gspread.authorize(creds)
 
 SPREADSHEET_ID = "1SN02jxpV2oyc3tWItY9c2Kc_UEXfqTdtQSL9WgGAi3w"
 
 # -----------------------------
-# Feuilles
+# SHEETS
 # -----------------------------
 SHEET_USERS = "Utilisateurs"
 SHEET_PRODUITS = "Produits"
@@ -34,52 +30,46 @@ SHEET_STOCK_DIST = "Stock_Distributeur"
 SHEET_COMMANDES = "Commandes_POS"
 
 # -----------------------------
-# Utils
+# UTILS
 # -----------------------------
 @st.cache_data(ttl=60)
-def load_sheet_df(sheet_name):
+def load_sheet(sheet):
     try:
-        sh = client.open_by_key(SPREADSHEET_ID)
-        ws = sh.worksheet(sheet_name)
+        ws = client.open_by_key(SPREADSHEET_ID).worksheet(sheet)
         df = pd.DataFrame(ws.get_all_records())
+
         if not df.empty:
             df.columns = df.columns.str.strip()
             df = df.map(lambda x: x.strip() if isinstance(x, str) else x)
+
         return df
-    except:
+    except Exception as e:
+        st.warning(f"Erreur chargement {sheet} : {e}")
         return pd.DataFrame()
 
-def append_row(sheet_name, row):
-    ws = client.open_by_key(SPREADSHEET_ID).worksheet(sheet_name)
+def append_row(sheet, row):
+    ws = client.open_by_key(SPREADSHEET_ID).worksheet(sheet)
     ws.append_row(row)
 
-def update_cell(sheet_name, row, col_name, new_value):
-    ws = client.open_by_key(SPREADSHEET_ID).worksheet(sheet_name)
+def update_cell(sheet, row, col_name, value):
+    ws = client.open_by_key(SPREADSHEET_ID).worksheet(sheet)
     headers = ws.row_values(1)
-    col_idx = headers.index(col_name) + 1
-    ws.update_cell(row, col_idx, new_value)
+    if col_name in headers:
+        col_index = headers.index(col_name) + 1
+        ws.update_cell(row, col_index, value)
 
-def compute_stock_distributeur():
-    df = load_sheet_df(SHEET_STOCK_DIST)
-    if df.empty:
-        return pd.DataFrame()
-
-    col_in = [c for c in df.columns if 'entree' in c.lower()]
-    col_out = [c for c in df.columns if 'sortie' in c.lower()]
-
-    df['in'] = pd.to_numeric(df[col_in[0]]) if col_in else 0
-    df['out'] = pd.to_numeric(df[col_out[0]]) if col_out else 0
-
-    grp = df.groupby('Produit').agg({'in':'sum','out':'sum'}).reset_index()
-    grp['Stock'] = grp['in'] - grp['out']
-    return grp[['Produit','Stock']]
+def get_column(df, possible_names):
+    for col in possible_names:
+        if col in df.columns:
+            return df[col]
+    return pd.Series()
 
 # -----------------------------
-# Session
+# SESSION
 # -----------------------------
-for k in ['logged','role','name','code_vendeur','code_animateur']:
-    if k not in st.session_state:
-        st.session_state[k] = "" if k!='logged' else False
+for key in ['logged', 'role', 'name', 'code_vendeur', 'code_animateur']:
+    if key not in st.session_state:
+        st.session_state[key] = "" if key != 'logged' else False
 
 # -----------------------------
 # LOGIN
@@ -91,11 +81,11 @@ if not st.session_state.logged:
     password = st.sidebar.text_input("Mot de passe", type="password")
 
     if st.sidebar.button("Se connecter"):
-        df_users = load_sheet_df(SHEET_USERS)
+        df_users = load_sheet(SHEET_USERS)
 
         user = df_users[
-            (df_users["Email"] == email) &
-            (df_users["Password"] == password)
+            (get_column(df_users, ["Email"]) == email) &
+            (get_column(df_users, ["Password"]) == password)
         ]
 
         if user.empty:
@@ -103,10 +93,10 @@ if not st.session_state.logged:
         else:
             user = user.iloc[0]
             st.session_state.logged = True
-            st.session_state.role = user["Role"]
-            st.session_state.name = user["Nom"]
-            st.session_state.code_vendeur = user.get("Code_Vendeur","")
-            st.session_state.code_animateur = user.get("Code_Animateur","")
+            st.session_state.role = user.get("Role", "")
+            st.session_state.name = user.get("Nom", "")
+            st.session_state.code_vendeur = user.get("Code_Vendeur", "")
+            st.session_state.code_animateur = user.get("Code_Animateur", "")
 
 # -----------------------------
 # MAIN
@@ -115,11 +105,11 @@ if st.session_state.logged:
 
     st.header(f"TSS Distribution — {st.session_state.name} ({st.session_state.role})")
 
-    df_produits = load_sheet_df(SHEET_PRODUITS)
-    df_pos = load_sheet_df(SHEET_LIST_POS)
-    df_cmd = load_sheet_df(SHEET_COMMANDES)
+    df_produits = load_sheet(SHEET_PRODUITS)
+    df_pos = load_sheet(SHEET_LIST_POS)
+    df_cmd = load_sheet(SHEET_COMMANDES)
 
-    produits = df_produits['Produit'].dropna().tolist() if not df_produits.empty else []
+    produits = get_column(df_produits, ["Produit", "Nom Produit", "NomProduit", "Name"]).dropna().tolist()
 
     # ======================================================
     # 🔵 ANIMATEUR
@@ -129,15 +119,16 @@ if st.session_state.logged:
         st.subheader("Saisie des ventes clients")
 
         today = datetime.now().strftime('%Y-%m-%d')
-
         code_pos = None
 
         if not df_pos.empty:
 
-            df_pos['Date_Visite'] = pd.to_datetime(df_pos['Date_Visite'], errors='coerce').dt.strftime('%Y-%m-%d')
+            df_pos['Date_Visite'] = pd.to_datetime(
+                get_column(df_pos, ["Date_Visite"]), errors='coerce'
+            ).dt.strftime('%Y-%m-%d')
 
             df_today = df_pos[
-                (df_pos['Code_Animateur'].astype(str) == str(st.session_state.code_animateur)) &
+                (get_column(df_pos, ["Code_Animateur"]).astype(str) == str(st.session_state.code_animateur)) &
                 (df_pos['Date_Visite'] == today)
             ]
 
@@ -145,15 +136,16 @@ if st.session_state.logged:
                 st.error("Aucun POS prévu aujourd’hui")
             else:
                 if len(df_today) > 1:
-                    code_pos = st.selectbox("Choisir POS", df_today['Code_POS'].tolist())
+                    code_pos = st.selectbox("Choisir POS", get_column(df_today, ["Code_POS"]).tolist())
                 else:
-                    code_pos = df_today.iloc[0]['Code_POS']
+                    code_pos = get_column(df_today, ["Code_POS"]).iloc[0]
                     st.success(f"POS : {code_pos}")
 
         if code_pos:
             with st.form("vente_client"):
-                nom = st.text_input("Nom")
-                prenom = st.text_input("Prénom")
+
+                nom = st.text_input("Nom client")
+                prenom = st.text_input("Prénom client")
                 adresse = st.text_input("Adresse")
                 tel = st.text_input("Téléphone")
 
@@ -161,6 +153,7 @@ if st.session_state.logged:
                 qte = st.number_input("Quantité", min_value=1)
 
                 if st.form_submit_button("Valider"):
+
                     row = [
                         str(uuid.uuid4()),
                         str(datetime.now()),
@@ -177,6 +170,7 @@ if st.session_state.logged:
                         st.session_state.name,
                         today
                     ]
+
                     append_row(SHEET_COMMANDES, row)
                     st.success("Vente enregistrée")
 
@@ -187,7 +181,7 @@ if st.session_state.logged:
 
         st.subheader("Prise de commande")
 
-        pos_list = df_pos['Code_POS'].dropna().tolist() if not df_pos.empty else []
+        pos_list = get_column(df_pos, ["Code_POS"]).dropna().tolist()
 
         code_pos = st.selectbox("POS", pos_list)
         produit = st.selectbox("Produit", produits)
@@ -217,19 +211,17 @@ if st.session_state.logged:
     # ======================================================
     elif st.session_state.role == "ADV":
 
-        tabs = st.tabs(["Stock","Commandes","Ventes"])
+        st.subheader("Suivi des commandes")
 
-        # STOCK
-        with tabs[0]:
-            df_stock = compute_stock_distributeur()
-            st.dataframe(df_stock)
+        if df_cmd.empty:
+            st.info("Aucune donnée")
+        else:
+            tab1, tab2 = st.tabs(["En attente", "Validées"])
 
-        # COMMANDES
-        with tabs[1]:
-            df_pending = df_cmd[df_cmd['Statut']=="En attente"] if not df_cmd.empty else pd.DataFrame()
-            st.dataframe(df_pending)
+            with tab1:
+                pending = df_cmd[df_cmd.get("Statut") == "En attente"]
+                st.dataframe(pending)
 
-        # VENTES
-        with tabs[2]:
-            df_valid = df_cmd[df_cmd['Statut']=="Validée"] if not df_cmd.empty else pd.DataFrame()
-            st.dataframe(df_valid)
+            with tab2:
+                valid = df_cmd[df_cmd.get("Statut") == "Validée"]
+                st.dataframe(valid)
