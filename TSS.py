@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 import pandas as pd
 import gspread
@@ -12,7 +11,7 @@ import uuid
 st.set_page_config(page_title="TSS - Animateurs", layout="wide")
 
 # -----------------------------
-# INIT SESSION (IMPORTANT)
+# INIT SESSION
 # -----------------------------
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
@@ -26,7 +25,7 @@ if "commande_submitted" not in st.session_state:
     st.session_state.commande_submitted = False
 
 # -----------------------------
-# Google Sheets / gspread
+# Google Sheets
 # -----------------------------
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -39,16 +38,13 @@ client = gspread.authorize(creds)
 
 SPREADSHEET_ID = "1SN02jxpV2oyc3tWItY9c2Kc_UEXfqTdtQSL9WgGAi3w"
 
-# -----------------------------
-# Feuilles
-# -----------------------------
 SHEET_USERS = "Utilisateurs"
 SHEET_PRODUITS = "Produits"
 SHEET_LIST_POS = "ListofPOS"
 SHEET_COMMANDES = "Commandes_POS"
 
 # -----------------------------
-# Fonctions utilitaires
+# Fonctions
 # -----------------------------
 @st.cache_data(ttl=60)
 def load_sheet_df_cached(sheet_name):
@@ -64,7 +60,6 @@ def load_sheet_df(sheet_name):
         if df.empty:
             return df
 
-        # Nettoyage
         df.columns = df.columns.str.strip()
         df = df.applymap(lambda x: x.strip() if isinstance(x, str) else x)
 
@@ -95,7 +90,6 @@ if not st.session_state.logged_in:
             st.sidebar.error("Feuille Utilisateurs vide.")
         else:
             df_users['Email'] = df_users['Email'].astype(str).str.strip().str.lower()
-
             user_row = df_users[df_users['Email'] == email_input.strip().lower()]
 
             if user_row.empty:
@@ -123,7 +117,7 @@ if st.session_state.logged_in:
         st.rerun()
 
 # -----------------------------
-# INTERFACE PRINCIPALE
+# INTERFACE
 # -----------------------------
 if st.session_state.logged_in:
 
@@ -132,14 +126,12 @@ if st.session_state.logged_in:
     df_produits = load_sheet_df_cached(SHEET_PRODUITS)
     df_list_pos = load_sheet_df_cached(SHEET_LIST_POS)
 
-    # Produits
     produits_dispo = []
     for col in ['Nom Produit', 'NomProduit', 'Produit', 'Name']:
         if col in df_produits.columns:
             produits_dispo = df_produits[col].dropna().tolist()
             break
 
-    # POS du jour
     today = datetime.now().strftime('%Y-%m-%d')
 
     if 'Date_Visite' in df_list_pos.columns:
@@ -158,9 +150,7 @@ if st.session_state.logged_in:
 
     tabs = st.tabs(["POS du jour", "Saisie commande", "Historique commandes"])
 
-    # -----------------------------
-    # TAB 1 : POS
-    # -----------------------------
+    # POS
     with tabs[0]:
         st.subheader("Plan de visite du jour")
 
@@ -169,9 +159,7 @@ if st.session_state.logged_in:
         else:
             st.dataframe(df_pos_today, use_container_width=True)
 
-    # -----------------------------
-    # TAB 2 : COMMANDE
-    # -----------------------------
+    # Commande
     with tabs[1]:
         st.subheader("Saisie commande")
 
@@ -210,9 +198,7 @@ if st.session_state.logged_in:
                 else:
                     st.error("Champs obligatoires manquants")
 
-    # -----------------------------
-    # TAB 3 : HISTORIQUE
-    # -----------------------------
+    # Historique
     with tabs[2]:
         st.subheader("Historique commandes")
 
@@ -223,19 +209,13 @@ if st.session_state.logged_in:
         else:
             if 'Code_Vendeur' in df_cmd.columns:
 
-                # Nettoyage IMPORTANT
                 df_cmd['Code_Vendeur'] = df_cmd['Code_Vendeur'].astype(str).str.strip().str.lower()
                 user_code = st.session_state.user_code_vendeur.strip().lower()
 
                 df_user_cmd = df_cmd[df_cmd['Code_Vendeur'] == user_code]
-
-                # DEBUG (tu peux supprimer après)
-                # st.write("User code:", user_code)
-                # st.write("Valeurs:", df_cmd['Code_Vendeur'].unique())
 
                 if df_user_cmd.empty:
                     st.info("Aucune commande trouvée.")
                 else:
                     df_user_cmd = df_user_cmd.sort_values(by=df_user_cmd.columns[1], ascending=False)
                     st.dataframe(df_user_cmd, use_container_width=True)
-```
