@@ -50,7 +50,7 @@ def load_sheet_df(sheet_name):
         if df.empty:
             return df
         df.columns = df.columns.str.strip()
-        df = df.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+        df = df.map(lambda x: x.strip() if isinstance(x, str) else x)
         return df
     except Exception as e:
         st.warning(f"Impossible de charger la feuille '{sheet_name}' ({e})")
