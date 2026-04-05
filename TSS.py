@@ -61,7 +61,7 @@ def load_sheet_df(sheet_name):
             return df
 
         df.columns = df.columns.str.strip()
-        df = df.applymap(lambda x: x.strip() if isinstance(x, str) else x)
+        df = df.map(lambda x: x.strip() if isinstance(x, str) else x)
 
         return df
 
