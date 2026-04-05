@@ -11,7 +11,7 @@ import uuid
 st.set_page_config(page_title="TSS - Animateurs", layout="wide")
 
 # -----------------------------
-# INIT SESSION
+# SESSION
 # -----------------------------
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
@@ -60,8 +60,12 @@ def load_sheet_df(sheet_name):
         if df.empty:
             return df
 
+        # Nettoyage colonnes
         df.columns = df.columns.str.strip()
-        df = df.map(lambda x: x.strip() if isinstance(x, str) else x)
+
+        # Nettoyage valeurs (remplace applymap par map colonne par colonne)
+        for col in df.columns:
+            df[col] = df[col].map(lambda x: x.strip() if isinstance(x, str) else x)
 
         return df
 
@@ -90,6 +94,7 @@ if not st.session_state.logged_in:
             st.sidebar.error("Feuille Utilisateurs vide.")
         else:
             df_users['Email'] = df_users['Email'].astype(str).str.strip().str.lower()
+
             user_row = df_users[df_users['Email'] == email_input.strip().lower()]
 
             if user_row.empty:
@@ -126,31 +131,36 @@ if st.session_state.logged_in:
     df_produits = load_sheet_df_cached(SHEET_PRODUITS)
     df_list_pos = load_sheet_df_cached(SHEET_LIST_POS)
 
+    # Produits
     produits_dispo = []
     for col in ['Nom Produit', 'NomProduit', 'Produit', 'Name']:
         if col in df_produits.columns:
             produits_dispo = df_produits[col].dropna().tolist()
             break
 
+    # Date du jour
     today = datetime.now().strftime('%Y-%m-%d')
 
+    # POS du jour
     if 'Date_Visite' in df_list_pos.columns:
         df_list_pos['Date_Visite'] = pd.to_datetime(
             df_list_pos['Date_Visite'], errors='coerce'
         ).dt.strftime('%Y-%m-%d')
 
-        df_list_pos['Animateur'] = df_list_pos['Animateur'].astype(str).str.strip()
+        df_list_pos['Code_Animateur'] = df_list_pos['Code_Animateur'].astype(str).str.strip()
 
         df_pos_today = df_list_pos[
             (df_list_pos['Date_Visite'] == today) &
-            (df_list_pos['Animateur'] == st.session_state.user_code_vendeur)
+            (df_list_pos['Code_Animateur'] == st.session_state.user_code_vendeur)
         ]
     else:
         df_pos_today = pd.DataFrame()
 
     tabs = st.tabs(["POS du jour", "Saisie commande", "Historique commandes"])
 
+    # -----------------------------
     # POS
+    # -----------------------------
     with tabs[0]:
         st.subheader("Plan de visite du jour")
 
@@ -159,7 +169,9 @@ if st.session_state.logged_in:
         else:
             st.dataframe(df_pos_today, use_container_width=True)
 
-    # Commande
+    # -----------------------------
+    # COMMANDE
+    # -----------------------------
     with tabs[1]:
         st.subheader("Saisie commande")
 
@@ -193,12 +205,13 @@ if st.session_state.logged_in:
                     append_row(SHEET_COMMANDES, row)
 
                     st.success("Commande ajoutée")
-                    st.session_state.commande_submitted = True
                     st.rerun()
                 else:
                     st.error("Champs obligatoires manquants")
 
-    # Historique
+    # -----------------------------
+    # HISTORIQUE
+    # -----------------------------
     with tabs[2]:
         st.subheader("Historique commandes")
 
