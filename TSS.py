@@ -4,6 +4,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
 import uuid
+import matplotlib.pyplot as plt
 
 # =====================================================
 # CONFIG
@@ -89,11 +90,9 @@ if st.session_state.logged_in:
     st.title(f"📊 TSS Distribution - {st.session_state.user_name}")
 
     df_ventes = load_sheet(SHEET_VENTES)
-    df_pos = load_sheet(SHEET_POS)
-    df_produits = load_sheet(SHEET_PRODUITS)
 
     # =====================================================
-    # CLEAN
+    # CLEAN DATA
     # =====================================================
     if not df_ventes.empty:
         df_ventes.columns = df_ventes.columns.str.strip()
@@ -101,98 +100,18 @@ if st.session_state.logged_in:
         df_ventes["Date"] = pd.to_datetime(df_ventes["Date"], errors="coerce")
 
     # =====================================================
-    # POS ROUTING
-    # =====================================================
-    today = pd.to_datetime(datetime.now().date())
-    pos_du_jour = []
-
-    if not df_pos.empty:
-        df_pos["Date_Visite"] = pd.to_datetime(df_pos["Date_Visite"], errors="coerce")
-        pos_du_jour = df_pos[df_pos["Date_Visite"].dt.date == today.date()]["Code_POS"].tolist()
-
-    # =====================================================
-    # VENDEUR
+    # VENDEUR (simplifié)
     # =====================================================
     if st.session_state.role == "vendeur":
 
-        st.header("🛒 Saisie ventes")
-
-        if not pos_du_jour:
-            st.warning("Aucun POS aujourd'hui")
-        else:
-
-            code_pos = st.selectbox("🏪 POS du jour", pos_du_jour)
-
-            nom_client = st.text_input("Client (optionnel)")
-            tel = st.text_input("Téléphone (optionnel)")
-
-            familles = []
-            produits_map = {}
-
-            if not df_produits.empty and "Famille" in df_produits.columns:
-                familles = df_produits["Famille"].dropna().unique().tolist()
-
-                for f in familles:
-                    produits_map[f] = df_produits[df_produits["Famille"] == f]["Nom Produit"].tolist()
-
-            if "lines" not in st.session_state:
-                st.session_state.lines = []
-
-            if st.button("➕ Ajouter produit"):
-                st.session_state.lines.append({"famille": "", "produit": "", "qte": 1})
-
-            new_lines = []
-
-            for i, l in enumerate(st.session_state.lines):
-
-                c1, c2, c3 = st.columns([2, 3, 2])
-
-                with c1:
-                    famille = st.selectbox("Famille", familles, key=f"f{i}")
-
-                with c2:
-                    produit = st.selectbox("Produit", produits_map.get(famille, []), key=f"p{i}")
-
-                with c3:
-                    qte = st.number_input("Qté", min_value=1, value=1, key=f"q{i}")
-
-                new_lines.append({
-                    "famille": famille,
-                    "produit": produit,
-                    "qte": qte
-                })
-
-            st.session_state.lines = new_lines
-
-            if new_lines:
-                st.dataframe(pd.DataFrame(new_lines))
-
-            if st.button("💾 Enregistrer"):
-
-                for l in new_lines:
-                    row = [
-                        str(uuid.uuid4()),
-                        str(datetime.now()),
-                        st.session_state.user_code,
-                        code_pos,
-                        nom_client,
-                        tel,
-                        l["famille"],
-                        l["produit"],
-                        l["qte"]
-                    ]
-                    append_row(SHEET_VENTES, row)
-
-                st.success("Ventes enregistrées")
-                st.session_state.lines = []
-
-        st.subheader("📜 Mes ventes")
+        st.header("🛒 Mes ventes")
 
         if not df_ventes.empty:
-            st.dataframe(df_ventes[df_ventes["Code_Vendeur"] == st.session_state.user_code])
+            my = df_ventes[df_ventes["Code_Vendeur"] == st.session_state.user_code]
+            st.dataframe(my)
 
     # =====================================================
-    # ADMIN
+    # ADMIN DASHBOARD
     # =====================================================
     if st.session_state.role == "admin":
 
@@ -213,26 +132,44 @@ if st.session_state.logged_in:
         c3.metric("Vendeurs", df["Code_Vendeur"].nunique())
 
         # =====================================================
-        # 📈 GRAPHE FAMILLE
+        # 📈 GRAPHE FAMILLE AVEC LABELS
         # =====================================================
         st.subheader("📈 Ventes par famille")
 
         fam = df.groupby("Famille")["qte"].sum()
-        st.markdown(f"### 🔢 Total unités : {int(fam.sum())}")
 
-        st.bar_chart(fam)
+        st.markdown(f"### 🔢 Total global : {int(fam.sum())}")
+
+        fig, ax = plt.subplots()
+
+        bars = ax.bar(fam.index, fam.values)
+
+        for bar in bars:
+            h = bar.get_height()
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                h,
+                f"{int(h)}",
+                ha="center",
+                va="bottom"
+            )
+
+        ax.set_ylabel("Quantité")
+        ax.set_xlabel("Famille")
+
+        st.pyplot(fig)
 
         # =====================================================
-        # 🏷️ FAMILLE
+        # 🏷️ TABLE FAMILLE
         # =====================================================
-        st.subheader("🏷️ Ventes par famille")
+        st.subheader("🏷️ Vente par famille")
 
         st.dataframe(fam.reset_index())
 
         # =====================================================
-        # 📦 FAMILLE × PRODUIT + SOUS-TOTAUX
+        # 📦 FAMILLE × PRODUIT + SOUS-TOTAL
         # =====================================================
-        st.subheader("📦 Famille × Produit")
+        st.subheader("📦 Famille × Produit (avec sous-totaux)")
 
         df_fp = df.groupby(["Famille", "Produit"])["qte"].sum().reset_index()
 
@@ -259,12 +196,16 @@ if st.session_state.logged_in:
 
         df_display = pd.DataFrame(result)
 
+        # STYLE SAFE (corrigé bug type)
         def style(row):
-            if row["type"] == "total":
+            if str(row.get("type", "")) == "total":
                 return ["background-color:#d9edf7; font-weight:bold"] * len(row)
             return [""] * len(row)
 
-        st.dataframe(df_display.drop(columns=["type"]).style.apply(style, axis=1), use_container_width=True)
+        st.dataframe(
+            df_display.drop(columns=["type"]).style.apply(style, axis=1),
+            use_container_width=True
+        )
 
         # =====================================================
         # 👤 VENDEURS
