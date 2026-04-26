@@ -27,7 +27,7 @@ SHEET_USERS = "Utilisateurs"
 SHEET_VENTES = "Ventes"
 
 # =====================================================
-# LOAD
+# LOAD DATA
 # =====================================================
 def load_sheet(name):
     try:
@@ -115,11 +115,11 @@ if st.session_state.logged_in:
         # =====================================================
         c1, c2, c3 = st.columns(3)
         c1.metric("Total unités", int(df["qte"].sum()))
-        c2.metric("Nb ventes", len(df))
+        c2.metric("Nb lignes ventes", len(df))
         c3.metric("Vendeurs", df["Code_Vendeur"].nunique())
 
         # =====================================================
-        # GRAPHE FAMILLE
+        # 📈 VENTES PAR FAMILLE
         # =====================================================
         st.subheader("📈 Ventes par famille")
 
@@ -130,9 +130,33 @@ if st.session_state.logged_in:
         st.bar_chart(fam)
 
         # =====================================================
-        # TABLE FAMILLE × PRODUIT AVEC SOUS-TOTAL
+        # 📦 TABLE FAMILLE
         # =====================================================
-        st.subheader("📦 Famille × Produit")
+        st.subheader("📦 Nombre de ventes par famille")
+
+        df_fam = df.groupby("Famille").agg(
+            Nombre_Ventes=("qte", "count"),
+            Quantite_Totale=("qte", "sum")
+        ).reset_index()
+
+        st.dataframe(df_fam, use_container_width=True)
+
+        # =====================================================
+        # 👤 TABLE VENDEUR
+        # =====================================================
+        st.subheader("👤 Nombre de ventes par vendeur")
+
+        df_vend = df.groupby("Code_Vendeur").agg(
+            Nombre_Ventes=("qte", "count"),
+            Quantite_Totale=("qte", "sum")
+        ).reset_index()
+
+        st.dataframe(df_vend, use_container_width=True)
+
+        # =====================================================
+        # 📦 FAMILLE × PRODUIT + SOUS-TOTAL
+        # =====================================================
+        st.subheader("📦 Famille × Produit (avec sous-totaux)")
 
         df_fp = df.groupby(["Famille", "Produit"])["qte"].sum().reset_index()
 
@@ -159,9 +183,6 @@ if st.session_state.logged_in:
 
         df_display = pd.DataFrame(result)
 
-        # =====================================================
-        # 🔐 SAFE STYLE (FIX KEYERROR DEFINITIF)
-        # =====================================================
         def highlight(row):
             if str(row.get("type", "")) == "total":
                 return [
@@ -169,33 +190,38 @@ if st.session_state.logged_in:
                 ] * len(row)
             return [""] * len(row)
 
-        styled = df_display.drop(columns=["type"]).style.apply(highlight, axis=1)
-
-        st.dataframe(styled, use_container_width=True)
-
-        # =====================================================
-        # VENDEURS
-        # =====================================================
-        st.subheader("👤 Ventes par vendeur")
-        st.bar_chart(df.groupby("Code_Vendeur")["qte"].sum())
+        st.dataframe(
+            df_display.drop(columns=["type"]).style.apply(highlight, axis=1),
+            use_container_width=True
+        )
 
         # =====================================================
-        # POS
-        # =====================================================
-        st.subheader("🏪 Ventes par POS")
-        st.bar_chart(df.groupby("Code_POS")["qte"].sum())
-
-        # =====================================================
-        # POS × FAMILLE
+        # 🏪 POS × FAMILLE + TOTAL + NB VENTES
         # =====================================================
         st.subheader("📊 POS × Famille")
 
-        st.dataframe(
-            df.pivot_table(
-                index="Code_POS",
-                columns="Famille",
-                values="qte",
-                aggfunc="sum",
-                fill_value=0
-            )
+        pivot_qte = df.pivot_table(
+            index="Code_POS",
+            columns="Famille",
+            values="qte",
+            aggfunc="sum",
+            fill_value=0
         )
+
+        nb_ventes_pos = df.groupby("Code_POS")["qte"].count()
+
+        pivot_qte["Total Quantité"] = pivot_qte.sum(axis=1)
+        pivot_qte["Nb Ventes"] = nb_ventes_pos
+
+        pivot_qte = pivot_qte.sort_values("Total Quantité", ascending=False)
+
+        st.dataframe(pivot_qte, use_container_width=True)
+
+        # =====================================================
+        # 🏪 POS SIMPLE
+        # =====================================================
+        st.subheader("🏪 Ventes par POS")
+
+        st.bar_chart(df.groupby("Code_POS")["qte"].sum())
+
+        st.dataframe(df.groupby("Code_POS")["qte"].sum().reset_index())
