@@ -64,25 +64,20 @@ if not st.session_state.logged_in:
     if st.sidebar.button("Se connecter"):
         df_users = load_sheet(SHEET_USERS)
 
-        if df_users.empty:
-            st.sidebar.error("Feuille utilisateurs vide")
+        user = df_users[df_users["Email"].astype(str).str.strip() == email.strip()]
+
+        if user.empty:
+            st.sidebar.error("Email incorrect")
         else:
-            df_users.columns = df_users.columns.str.strip()
-
-            user = df_users[df_users["Email"].astype(str).str.strip() == email.strip()]
-
-            if user.empty:
-                st.sidebar.error("Email incorrect")
+            user = user.iloc[0]
+            if str(user["Password"]).strip() != password.strip():
+                st.sidebar.error("Mot de passe incorrect")
             else:
-                user = user.iloc[0]
-                if str(user["Password"]).strip() != password.strip():
-                    st.sidebar.error("Mot de passe incorrect")
-                else:
-                    st.session_state.logged_in = True
-                    st.session_state.user_name = user.get("Nom", "User")
-                    st.session_state.user_code = user.get("Code_Vendeur", "")
-                    st.session_state.user_role = str(user.get("Role", "Vendeur")).strip().lower()
-                    st.success("Connecté")
+                st.session_state.logged_in = True
+                st.session_state.user_name = user.get("Nom", "User")
+                st.session_state.user_code = user.get("Code_Vendeur", "")
+                st.session_state.user_role = str(user.get("Role", "Vendeur")).strip().lower()
+                st.success("Connecté")
 
 # -----------------------------
 # MAIN APP
@@ -93,15 +88,25 @@ if st.session_state.logged_in:
 
     df_produits = load_sheet(SHEET_PRODUITS)
 
+    # -----------------------------
+    # PRODUITS + FAMILLES
+    # -----------------------------
     produits = []
+    familles = []
+    produits_par_famille = {}
+
     if not df_produits.empty:
-        for col in ["Nom Produit", "Produit", "Name"]:
-            if col in df_produits.columns:
-                produits = df_produits[col].dropna().tolist()
-                break
+        if "Nom Produit" in df_produits.columns:
+            produits = df_produits["Nom Produit"].dropna().tolist()
+
+        if "Famille" in df_produits.columns:
+            familles = sorted(df_produits["Famille"].dropna().unique().tolist())
+
+            for f in familles:
+                produits_par_famille[f] = df_produits[df_produits["Famille"] == f]["Nom Produit"].tolist()
 
     # -----------------------------
-    # SAISIE VENTES (TOUT LE MONDE)
+    # SAISIE VENTES
     # -----------------------------
     st.header("🛒 Saisie des ventes")
 
@@ -112,23 +117,43 @@ if st.session_state.logged_in:
         st.session_state.lignes = []
 
     if st.button("➕ Ajouter produit"):
-        st.session_state.lignes.append({"produit": "", "quantite": 1})
+        st.session_state.lignes.append({"famille": "", "produit": "", "quantite": 1})
 
     nouvelles_lignes = []
     total = 0
 
     for i, ligne in enumerate(st.session_state.lignes):
-        col1, col2, col3 = st.columns([3, 2, 1])
+
+        col1, col2, col3, col4 = st.columns([2, 3, 2, 1])
 
         with col1:
-            produit = st.selectbox(f"Produit {i+1}", produits, key=f"p{i}")
+            famille = st.selectbox(
+                f"Famille {i+1}",
+                familles,
+                key=f"fam{i}"
+            )
+
         with col2:
-            qte = st.number_input(f"Qté {i+1}", min_value=1, value=ligne["quantite"], key=f"q{i}")
+            produits_filtrés = produits_par_famille.get(famille, produits)
+            produit = st.selectbox(
+                f"Produit {i+1}",
+                produits_filtrés,
+                key=f"prod{i}"
+            )
+
         with col3:
-            if st.button("❌", key=f"d{i}"):
+            qte = st.number_input("Qté", min_value=1, value=1, key=f"qte{i}")
+
+        with col4:
+            if st.button("❌", key=f"del{i}"):
                 continue
 
-        nouvelles_lignes.append({"produit": produit, "quantite": qte})
+        nouvelles_lignes.append({
+            "famille": famille,
+            "produit": produit,
+            "quantite": qte
+        })
+
         total += qte
 
     st.session_state.lignes = nouvelles_lignes
@@ -137,6 +162,9 @@ if st.session_state.logged_in:
         st.dataframe(pd.DataFrame(nouvelles_lignes), use_container_width=True)
         st.write(f"**Total produits vendus : {total}**")
 
+    # -----------------------------
+    # ENREGISTREMENT
+    # -----------------------------
     if st.button("💾 Enregistrer les ventes"):
         if not nouvelles_lignes:
             st.warning("Ajoutez au moins un produit")
@@ -147,6 +175,7 @@ if st.session_state.logged_in:
                     str(datetime.now()),
                     nom_client,
                     telephone,
+                    ligne["famille"],
                     ligne["produit"],
                     ligne["quantite"],
                     st.session_state.user_code
@@ -157,10 +186,13 @@ if st.session_state.logged_in:
             st.session_state.lignes = []
 
     # -----------------------------
-    # VENDEUR → SES VENTES
+    # LOAD VENTES
     # -----------------------------
     df_ventes = load_sheet(SHEET_VENTES)
 
+    # -----------------------------
+    # VENDEUR
+    # -----------------------------
     if st.session_state.user_role == "vendeur":
         st.markdown("---")
         st.header("📜 Mes ventes")
@@ -170,50 +202,77 @@ if st.session_state.logged_in:
                 df_ventes["Code_Vendeur"].astype(str).str.strip() == str(st.session_state.user_code).strip()
             ]
 
-            if df_user.empty:
-                st.info("Aucune vente pour vous")
-            else:
-                st.dataframe(df_user.sort_values(by="Date", ascending=False), use_container_width=True)
+            st.dataframe(df_user.sort_values(by="Date", ascending=False), use_container_width=True)
 
     # -----------------------------
-    # ADMIN → DASHBOARD
+    # ADMIN DASHBOARD
     # -----------------------------
     if st.session_state.user_role == "admin":
 
         st.markdown("---")
         st.header("📊 Dashboard Admin")
 
-        if df_ventes.empty:
-            st.warning("Aucune donnée dans Ventes")
-        else:
+        if not df_ventes.empty:
+
             df_ventes.columns = df_ventes.columns.str.strip()
+            df_ventes["Quantite"] = pd.to_numeric(df_ventes["Quantite"], errors="coerce").fillna(0)
+            df_ventes["Date"] = pd.to_datetime(df_ventes["Date"], errors="coerce")
+            df_ventes = df_ventes.dropna(subset=["Date"])
 
-            if "Quantite" not in df_ventes.columns or "Date" not in df_ventes.columns:
-                st.error("Colonnes manquantes")
-            else:
-                df_ventes["Quantite"] = pd.to_numeric(df_ventes["Quantite"], errors="coerce").fillna(0)
-                df_ventes["Date"] = pd.to_datetime(df_ventes["Date"], errors="coerce")
+            # KPI
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Produits", int(df_ventes["Quantite"].sum()))
+            col2.metric("Nb Ventes", len(df_ventes))
+            col3.metric("Vendeurs actifs", df_ventes["Code_Vendeur"].nunique())
 
-                df_ventes = df_ventes.dropna(subset=["Date"])
+            # -----------------------------
+            # VENTES PAR FAMILLE
+            # -----------------------------
+            st.markdown("### 🏷️ Ventes par famille")
 
-                # KPI
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Total Produits", int(df_ventes["Quantite"].sum()))
-                col2.metric("Nb Ventes", len(df_ventes))
-                col3.metric("Vendeurs actifs", df_ventes["Code_Vendeur"].nunique())
+            famille_df = df_ventes.groupby("Famille")["Quantite"].sum().reset_index()
+            famille_df = famille_df.sort_values(by="Quantite", ascending=False)
 
-                # Top produits
-                st.markdown("### 🏆 Top Produits")
-                st.bar_chart(df_ventes.groupby("Produit")["Quantite"].sum().sort_values(ascending=False))
+            st.dataframe(famille_df, use_container_width=True)
+            st.bar_chart(famille_df.set_index("Famille"))
 
-                # Vendeurs
-                st.markdown("### 🧑‍💼 Performance")
-                st.bar_chart(df_ventes.groupby("Code_Vendeur")["Quantite"].sum())
+            # -----------------------------
+            # DETAIL PRODUIT
+            # -----------------------------
+            st.markdown("### 📦 Détail par produit")
 
-                # Evolution
-                st.markdown("### 📈 Evolution")
-                st.line_chart(df_ventes.groupby(df_ventes["Date"].dt.date)["Quantite"].sum())
+            detail_df = df_ventes.groupby(["Famille", "Produit"])["Quantite"].sum().reset_index()
+            detail_df = detail_df.sort_values(by="Quantite", ascending=False)
 
-                # Table
-                st.markdown("### 📜 Détail")
-                st.dataframe(df_ventes.sort_values(by="Date", ascending=False), use_container_width=True)
+            st.dataframe(detail_df, use_container_width=True)
+
+            # -----------------------------
+            # TOP PRODUITS
+            # -----------------------------
+            st.markdown("### 🏆 Top Produits")
+
+            top_prod = df_ventes.groupby("Produit")["Quantite"].sum().sort_values(ascending=False)
+            st.bar_chart(top_prod)
+
+            # -----------------------------
+            # PERFORMANCE VENDEURS
+            # -----------------------------
+            st.markdown("### 🧑‍💼 Performance commerciaux")
+
+            perf = df_ventes.groupby("Code_Vendeur")["Quantite"].sum()
+            st.bar_chart(perf)
+
+            # -----------------------------
+            # EVOLUTION
+            # -----------------------------
+            st.markdown("### 📈 Evolution")
+
+            evo = df_ventes.groupby(df_ventes["Date"].dt.date)["Quantite"].sum()
+            st.line_chart(evo)
+
+            # -----------------------------
+            # DETAIL
+            # -----------------------------
+            st.markdown("### 📜 Détail ventes")
+
+            st.dataframe(df_ventes.sort_values(by="Date", ascending=False), use_container_width=True)
