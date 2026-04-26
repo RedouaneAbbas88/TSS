@@ -3,7 +3,6 @@ import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
-import uuid
 
 # =====================================================
 # CONFIG
@@ -81,38 +80,35 @@ if st.session_state.logged_in:
 
     st.title(f"📊 TSS Distribution - {st.session_state.user_name}")
 
-    df_ventes = load_sheet(SHEET_VENTES)
+    df = load_sheet(SHEET_VENTES)
 
     # =====================================================
-    # CLEAN
+    # CLEAN DATA
     # =====================================================
-    if not df_ventes.empty:
-        df_ventes.columns = df_ventes.columns.str.strip()
-        df_ventes["qte"] = pd.to_numeric(df_ventes["qte"], errors="coerce").fillna(0)
+    if not df.empty:
+        df.columns = df.columns.str.strip()
+        df["qte"] = pd.to_numeric(df["qte"], errors="coerce").fillna(0)
 
     # =====================================================
-    # VENDEUR
+    # VENDEUR VIEW
     # =====================================================
     if st.session_state.role == "vendeur":
 
         st.header("🛒 Mes ventes")
 
-        if not df_ventes.empty:
-            my = df_ventes[df_ventes["Code_Vendeur"] == st.session_state.user_code]
-            st.dataframe(my)
+        my = df[df["Code_Vendeur"] == st.session_state.user_code]
+        st.dataframe(my)
 
     # =====================================================
-    # ADMIN
+    # ADMIN DASHBOARD
     # =====================================================
     if st.session_state.role == "admin":
 
         st.header("📊 Dashboard Admin")
 
-        if df_ventes.empty:
+        if df.empty:
             st.warning("Aucune donnée")
             st.stop()
-
-        df = df_ventes.copy()
 
         # =====================================================
         # KPI
@@ -134,7 +130,7 @@ if st.session_state.logged_in:
         st.bar_chart(fam)
 
         # =====================================================
-        # TABLE FAMILLE × PRODUIT + SOUS-TOTAL COLORÉ
+        # TABLE FAMILLE × PRODUIT AVEC SOUS-TOTAL
         # =====================================================
         st.subheader("📦 Famille × Produit")
 
@@ -164,10 +160,10 @@ if st.session_state.logged_in:
         df_display = pd.DataFrame(result)
 
         # =====================================================
-        # 🎨 STYLE SOUS-TOTAL (FOND COLORÉ)
+        # 🔐 SAFE STYLE (FIX KEYERROR DEFINITIF)
         # =====================================================
         def highlight(row):
-            if row["type"] == "total":
+            if str(row.get("type", "")) == "total":
                 return [
                     "background-color:#d9edf7; font-weight:bold; color:black"
                 ] * len(row)
@@ -175,7 +171,7 @@ if st.session_state.logged_in:
 
         styled = df_display.drop(columns=["type"]).style.apply(highlight, axis=1)
 
-        st.write(styled)
+        st.dataframe(styled, use_container_width=True)
 
         # =====================================================
         # VENDEURS
