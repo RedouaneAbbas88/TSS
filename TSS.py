@@ -118,7 +118,7 @@ if st.session_state.logged_in:
         st.header("🛒 Saisie ventes")
 
         if not pos_du_jour:
-            st.warning("Aucun POS aujourd’hui")
+            st.warning("Aucun POS aujourd'hui")
         else:
 
             code_pos = st.selectbox("🏪 POS du jour", pos_du_jour)
@@ -218,52 +218,67 @@ if st.session_state.logged_in:
         c3.metric("Vendeurs", df["Code_Vendeur"].nunique())
 
         # =====================================================
-        # 1. GRAPHE FAMILLE (EN PREMIER)
+        # 📈 GRAPHE FAMILLE (1er)
         # =====================================================
         st.subheader("📈 Ventes par famille")
 
         st.bar_chart(df.groupby("Famille")["qte"].sum())
 
         # =====================================================
-        # 2. TABLE FAMILLE
+        # 🏷️ TABLE FAMILLE
         # =====================================================
         st.subheader("🏷️ Vente par famille")
 
         st.dataframe(df.groupby("Famille")["qte"].sum().reset_index())
 
         # =====================================================
-        # 3. FAMILLE × PRODUIT
+        # 📦 FAMILLE × PRODUIT + SOUS-TOTAUX
         # =====================================================
-        st.subheader("📦 Famille × Produit")
+        st.subheader("📦 Famille × Produit (avec sous-totaux)")
 
-        st.dataframe(
-            df.groupby(["Famille", "Produit"])["qte"].sum().reset_index()
-        )
+        df_fp = df.groupby(["Famille", "Produit"])["qte"].sum().reset_index()
+
+        result = []
+
+        for fam in df_fp["Famille"].unique():
+
+            df_fam = df_fp[df_fp["Famille"] == fam]
+
+            for _, row in df_fam.iterrows():
+                result.append({
+                    "Famille": fam,
+                    "Produit": "   ↳ " + str(row["Produit"]),
+                    "Quantité": row["qte"]
+                })
+
+            result.append({
+                "Famille": fam,
+                "Produit": "🔹 Sous-total",
+                "Quantité": df_fam["qte"].sum()
+            })
+
+        st.dataframe(pd.DataFrame(result), use_container_width=True)
 
         # =====================================================
-        # 4. VENDEURS
+        # 👤 VENDEURS
         # =====================================================
         st.subheader("👤 Ventes par vendeur")
 
         st.bar_chart(df.groupby("Code_Vendeur")["qte"].sum())
 
-        st.dataframe(
-            df.groupby("Code_Vendeur")["qte"].sum().reset_index()
-        )
+        st.dataframe(df.groupby("Code_Vendeur")["qte"].sum().reset_index())
 
         # =====================================================
-        # 5. POS
+        # 🏪 POS
         # =====================================================
         st.subheader("🏪 Ventes par POS")
 
         st.bar_chart(df.groupby("Code_POS")["qte"].sum())
 
-        st.dataframe(
-            df.groupby("Code_POS")["qte"].sum().reset_index()
-        )
+        st.dataframe(df.groupby("Code_POS")["qte"].sum().reset_index())
 
         # =====================================================
-        # 6. POS × FAMILLE
+        # 📊 POS × FAMILLE
         # =====================================================
         st.subheader("📊 POS × Famille")
 
