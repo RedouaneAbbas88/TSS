@@ -4,7 +4,6 @@ import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
 import uuid
-import matplotlib.pyplot as plt
 
 # =====================================================
 # CONFIG
@@ -31,7 +30,7 @@ SHEET_POS = "ListofPOS"
 SHEET_PRODUITS = "Produits"
 
 # =====================================================
-# LOAD
+# LOAD DATA
 # =====================================================
 def load_sheet(name):
     try:
@@ -100,7 +99,7 @@ if st.session_state.logged_in:
         df_ventes["Date"] = pd.to_datetime(df_ventes["Date"], errors="coerce")
 
     # =====================================================
-    # VENDEUR (simplifié)
+    # VENDEUR
     # =====================================================
     if st.session_state.role == "vendeur":
 
@@ -132,7 +131,7 @@ if st.session_state.logged_in:
         c3.metric("Vendeurs", df["Code_Vendeur"].nunique())
 
         # =====================================================
-        # 📈 GRAPHE FAMILLE AVEC LABELS
+        # 📈 GRAPHE FAMILLE (SANS MATPLOTLIB)
         # =====================================================
         st.subheader("📈 Ventes par famille")
 
@@ -140,24 +139,7 @@ if st.session_state.logged_in:
 
         st.markdown(f"### 🔢 Total global : {int(fam.sum())}")
 
-        fig, ax = plt.subplots()
-
-        bars = ax.bar(fam.index, fam.values)
-
-        for bar in bars:
-            h = bar.get_height()
-            ax.text(
-                bar.get_x() + bar.get_width() / 2,
-                h,
-                f"{int(h)}",
-                ha="center",
-                va="bottom"
-            )
-
-        ax.set_ylabel("Quantité")
-        ax.set_xlabel("Famille")
-
-        st.pyplot(fig)
+        st.bar_chart(fam)
 
         # =====================================================
         # 🏷️ TABLE FAMILLE
@@ -167,7 +149,7 @@ if st.session_state.logged_in:
         st.dataframe(fam.reset_index())
 
         # =====================================================
-        # 📦 FAMILLE × PRODUIT + SOUS-TOTAL
+        # 📦 FAMILLE × PRODUIT + SOUS-TOTALS
         # =====================================================
         st.subheader("📦 Famille × Produit (avec sous-totaux)")
 
@@ -196,7 +178,6 @@ if st.session_state.logged_in:
 
         df_display = pd.DataFrame(result)
 
-        # STYLE SAFE (corrigé bug type)
         def style(row):
             if str(row.get("type", "")) == "total":
                 return ["background-color:#d9edf7; font-weight:bold"] * len(row)
