@@ -30,7 +30,7 @@ SHEET_POS = "ListofPOS"
 SHEET_PRODUITS = "Produits"
 
 # =====================================================
-# FUNCTIONS
+# LOAD
 # =====================================================
 def load_sheet(name):
     try:
@@ -93,7 +93,7 @@ if st.session_state.logged_in:
     df_produits = load_sheet(SHEET_PRODUITS)
 
     # =====================================================
-    # CLEAN DATA
+    # CLEAN
     # =====================================================
     if not df_ventes.empty:
         df_ventes.columns = df_ventes.columns.str.strip()
@@ -151,11 +151,7 @@ if st.session_state.logged_in:
                     famille = st.selectbox("Famille", familles, key=f"f{i}")
 
                 with c2:
-                    produit = st.selectbox(
-                        "Produit",
-                        produits_map.get(famille, []),
-                        key=f"p{i}"
-                    )
+                    produit = st.selectbox("Produit", produits_map.get(famille, []), key=f"p{i}")
 
                 with c3:
                     qte = st.number_input("Qté", min_value=1, value=1, key=f"q{i}")
@@ -193,11 +189,10 @@ if st.session_state.logged_in:
         st.subheader("📜 Mes ventes")
 
         if not df_ventes.empty:
-            my = df_ventes[df_ventes["Code_Vendeur"] == st.session_state.user_code]
-            st.dataframe(my)
+            st.dataframe(df_ventes[df_ventes["Code_Vendeur"] == st.session_state.user_code])
 
     # =====================================================
-    # ADMIN DASHBOARD
+    # ADMIN
     # =====================================================
     if st.session_state.role == "admin":
 
@@ -218,46 +213,58 @@ if st.session_state.logged_in:
         c3.metric("Vendeurs", df["Code_Vendeur"].nunique())
 
         # =====================================================
-        # 📈 GRAPHE FAMILLE (1er)
+        # 📈 GRAPHE FAMILLE
         # =====================================================
         st.subheader("📈 Ventes par famille")
 
-        st.bar_chart(df.groupby("Famille")["qte"].sum())
+        fam = df.groupby("Famille")["qte"].sum()
+        st.markdown(f"### 🔢 Total unités : {int(fam.sum())}")
+
+        st.bar_chart(fam)
 
         # =====================================================
-        # 🏷️ TABLE FAMILLE
+        # 🏷️ FAMILLE
         # =====================================================
-        st.subheader("🏷️ Vente par famille")
+        st.subheader("🏷️ Ventes par famille")
 
-        st.dataframe(df.groupby("Famille")["qte"].sum().reset_index())
+        st.dataframe(fam.reset_index())
 
         # =====================================================
         # 📦 FAMILLE × PRODUIT + SOUS-TOTAUX
         # =====================================================
-        st.subheader("📦 Famille × Produit (avec sous-totaux)")
+        st.subheader("📦 Famille × Produit")
 
         df_fp = df.groupby(["Famille", "Produit"])["qte"].sum().reset_index()
 
         result = []
 
-        for fam in df_fp["Famille"].unique():
+        for fam_name in df_fp["Famille"].unique():
 
-            df_fam = df_fp[df_fp["Famille"] == fam]
+            df_fam = df_fp[df_fp["Famille"] == fam_name]
 
             for _, row in df_fam.iterrows():
                 result.append({
-                    "Famille": fam,
+                    "Famille": fam_name,
                     "Produit": "   ↳ " + str(row["Produit"]),
-                    "Quantité": row["qte"]
+                    "Quantité": row["qte"],
+                    "type": "detail"
                 })
 
             result.append({
-                "Famille": fam,
+                "Famille": fam_name,
                 "Produit": "🔹 Sous-total",
-                "Quantité": df_fam["qte"].sum()
+                "Quantité": df_fam["qte"].sum(),
+                "type": "total"
             })
 
-        st.dataframe(pd.DataFrame(result), use_container_width=True)
+        df_display = pd.DataFrame(result)
+
+        def style(row):
+            if row["type"] == "total":
+                return ["background-color:#d9edf7; font-weight:bold"] * len(row)
+            return [""] * len(row)
+
+        st.dataframe(df_display.drop(columns=["type"]).style.apply(style, axis=1), use_container_width=True)
 
         # =====================================================
         # 👤 VENDEURS
