@@ -26,11 +26,9 @@ SPREADSHEET_ID = "1SN02jxpV2oyc3tWItY9c2Kc_UEXfqTdtQSL9WgGAi3w"
 
 SHEET_USERS = "Utilisateurs"
 SHEET_VENTES = "Ventes"
-SHEET_POS = "ListofPOS"
-SHEET_PRODUITS = "Produits"
 
 # =====================================================
-# LOAD DATA
+# LOAD
 # =====================================================
 def load_sheet(name):
     try:
@@ -42,11 +40,6 @@ def load_sheet(name):
         return df
     except:
         return pd.DataFrame()
-
-def append_row(sheet, row):
-    sh = client.open_by_key(SPREADSHEET_ID)
-    ws = sh.worksheet(sheet)
-    ws.append_row(row)
 
 # =====================================================
 # LOGIN
@@ -91,12 +84,11 @@ if st.session_state.logged_in:
     df_ventes = load_sheet(SHEET_VENTES)
 
     # =====================================================
-    # CLEAN DATA
+    # CLEAN
     # =====================================================
     if not df_ventes.empty:
         df_ventes.columns = df_ventes.columns.str.strip()
         df_ventes["qte"] = pd.to_numeric(df_ventes["qte"], errors="coerce").fillna(0)
-        df_ventes["Date"] = pd.to_datetime(df_ventes["Date"], errors="coerce")
 
     # =====================================================
     # VENDEUR
@@ -110,7 +102,7 @@ if st.session_state.logged_in:
             st.dataframe(my)
 
     # =====================================================
-    # ADMIN DASHBOARD
+    # ADMIN
     # =====================================================
     if st.session_state.role == "admin":
 
@@ -131,7 +123,7 @@ if st.session_state.logged_in:
         c3.metric("Vendeurs", df["Code_Vendeur"].nunique())
 
         # =====================================================
-        # 📈 GRAPHE FAMILLE (SANS MATPLOTLIB)
+        # GRAPHE FAMILLE
         # =====================================================
         st.subheader("📈 Ventes par famille")
 
@@ -142,16 +134,9 @@ if st.session_state.logged_in:
         st.bar_chart(fam)
 
         # =====================================================
-        # 🏷️ TABLE FAMILLE
+        # TABLE FAMILLE × PRODUIT + SOUS-TOTAL COLORÉ
         # =====================================================
-        st.subheader("🏷️ Vente par famille")
-
-        st.dataframe(fam.reset_index())
-
-        # =====================================================
-        # 📦 FAMILLE × PRODUIT + SOUS-TOTALS
-        # =====================================================
-        st.subheader("📦 Famille × Produit (avec sous-totaux)")
+        st.subheader("📦 Famille × Produit")
 
         df_fp = df.groupby(["Famille", "Produit"])["qte"].sum().reset_index()
 
@@ -178,36 +163,34 @@ if st.session_state.logged_in:
 
         df_display = pd.DataFrame(result)
 
-        def style(row):
-            if str(row.get("type", "")) == "total":
-                return ["background-color:#d9edf7; font-weight:bold"] * len(row)
+        # =====================================================
+        # 🎨 STYLE SOUS-TOTAL (FOND COLORÉ)
+        # =====================================================
+        def highlight(row):
+            if row["type"] == "total":
+                return [
+                    "background-color:#d9edf7; font-weight:bold; color:black"
+                ] * len(row)
             return [""] * len(row)
 
-        st.dataframe(
-            df_display.drop(columns=["type"]).style.apply(style, axis=1),
-            use_container_width=True
-        )
+        styled = df_display.drop(columns=["type"]).style.apply(highlight, axis=1)
+
+        st.write(styled)
 
         # =====================================================
-        # 👤 VENDEURS
+        # VENDEURS
         # =====================================================
         st.subheader("👤 Ventes par vendeur")
-
         st.bar_chart(df.groupby("Code_Vendeur")["qte"].sum())
 
-        st.dataframe(df.groupby("Code_Vendeur")["qte"].sum().reset_index())
-
         # =====================================================
-        # 🏪 POS
+        # POS
         # =====================================================
         st.subheader("🏪 Ventes par POS")
-
         st.bar_chart(df.groupby("Code_POS")["qte"].sum())
 
-        st.dataframe(df.groupby("Code_POS")["qte"].sum().reset_index())
-
         # =====================================================
-        # 📊 POS × FAMILLE
+        # POS × FAMILLE
         # =====================================================
         st.subheader("📊 POS × Famille")
 
