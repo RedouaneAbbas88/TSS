@@ -5,9 +5,9 @@ from google.oauth2.service_account import Credentials
 from datetime import datetime
 import uuid
 
-# -----------------------------
+# =====================================================
 # CONFIG
-# -----------------------------
+# =====================================================
 st.set_page_config(page_title="TSS Distribution", layout="wide")
 
 SCOPES = [
@@ -29,9 +29,9 @@ SHEET_VENTES = "Ventes"
 SHEET_POS = "ListofPOS"
 SHEET_PRODUITS = "Produits"
 
-# -----------------------------
-# LOAD DATA
-# -----------------------------
+# =====================================================
+# FUNCTIONS
+# =====================================================
 def load_sheet(name):
     try:
         sh = client.open_by_key(SPREADSHEET_ID)
@@ -48,13 +48,13 @@ def append_row(sheet, row):
     ws = sh.worksheet(sheet)
     ws.append_row(row)
 
-# -----------------------------
+# =====================================================
 # LOGIN
-# -----------------------------
+# =====================================================
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 
-st.sidebar.title("Connexion")
+st.sidebar.header("Connexion")
 
 if not st.session_state.logged_in:
 
@@ -81,9 +81,9 @@ if not st.session_state.logged_in:
                 st.session_state.user_name = user["Nom"]
                 st.rerun()
 
-# -----------------------------
+# =====================================================
 # APP
-# -----------------------------
+# =====================================================
 if st.session_state.logged_in:
 
     st.title(f"📊 TSS Distribution - {st.session_state.user_name}")
@@ -92,24 +92,17 @@ if st.session_state.logged_in:
     df_pos = load_sheet(SHEET_POS)
     df_produits = load_sheet(SHEET_PRODUITS)
 
-    # -----------------------------
-    # SAFE CLEAN VENTES
-    # -----------------------------
+    # =====================================================
+    # CLEAN DATA
+    # =====================================================
     if not df_ventes.empty:
         df_ventes.columns = df_ventes.columns.str.strip()
-
-        if "qte" not in df_ventes.columns:
-            st.error("Colonne 'qte' introuvable dans Ventes")
-            st.stop()
-
         df_ventes["qte"] = pd.to_numeric(df_ventes["qte"], errors="coerce").fillna(0)
+        df_ventes["Date"] = pd.to_datetime(df_ventes["Date"], errors="coerce")
 
-        if "Date" in df_ventes.columns:
-            df_ventes["Date"] = pd.to_datetime(df_ventes["Date"], errors="coerce")
-
-    # -----------------------------
+    # =====================================================
     # POS ROUTING
-    # -----------------------------
+    # =====================================================
     today = pd.to_datetime(datetime.now().date())
     pos_du_jour = []
 
@@ -117,15 +110,15 @@ if st.session_state.logged_in:
         df_pos["Date_Visite"] = pd.to_datetime(df_pos["Date_Visite"], errors="coerce")
         pos_du_jour = df_pos[df_pos["Date_Visite"].dt.date == today.date()]["Code_POS"].tolist()
 
-    # -----------------------------
+    # =====================================================
     # VENDEUR
-    # -----------------------------
+    # =====================================================
     if st.session_state.role == "vendeur":
 
         st.header("🛒 Saisie ventes")
 
         if not pos_du_jour:
-            st.warning("Aucun POS planifié aujourd'hui")
+            st.warning("Aucun POS aujourd’hui")
         else:
 
             code_pos = st.selectbox("🏪 POS du jour", pos_du_jour)
@@ -136,12 +129,11 @@ if st.session_state.logged_in:
             familles = []
             produits_map = {}
 
-            if not df_produits.empty:
-                if "Famille" in df_produits.columns:
-                    familles = df_produits["Famille"].dropna().unique().tolist()
+            if not df_produits.empty and "Famille" in df_produits.columns:
+                familles = df_produits["Famille"].dropna().unique().tolist()
 
-                    for f in familles:
-                        produits_map[f] = df_produits[df_produits["Famille"] == f]["Nom Produit"].tolist()
+                for f in familles:
+                    produits_map[f] = df_produits[df_produits["Famille"] == f]["Nom Produit"].tolist()
 
             if "lines" not in st.session_state:
                 st.session_state.lines = []
@@ -198,18 +190,15 @@ if st.session_state.logged_in:
                 st.success("Ventes enregistrées")
                 st.session_state.lines = []
 
-        # -----------------------------
-        # MES VENTES
-        # -----------------------------
         st.subheader("📜 Mes ventes")
 
         if not df_ventes.empty:
             my = df_ventes[df_ventes["Code_Vendeur"] == st.session_state.user_code]
             st.dataframe(my)
 
-    # -----------------------------
+    # =====================================================
     # ADMIN DASHBOARD
-    # -----------------------------
+    # =====================================================
     if st.session_state.role == "admin":
 
         st.header("📊 Dashboard Admin")
@@ -220,71 +209,70 @@ if st.session_state.logged_in:
 
         df = df_ventes.copy()
 
+        # =====================================================
         # KPI
+        # =====================================================
         c1, c2, c3 = st.columns(3)
         c1.metric("Total unités", int(df["qte"].sum()))
         c2.metric("Nb ventes", len(df))
         c3.metric("Vendeurs", df["Code_Vendeur"].nunique())
 
-        # -----------------------------
-        # PAR FAMILLE
-        # -----------------------------
-        st.subheader("🏷️ Par famille")
+        # =====================================================
+        # 1. GRAPHE FAMILLE (EN PREMIER)
+        # =====================================================
+        st.subheader("📈 Ventes par famille")
 
-        fam = df.groupby("Famille")["qte"].sum().reset_index()
-        st.dataframe(fam)
-        st.bar_chart(fam.set_index("Famille"))
+        st.bar_chart(df.groupby("Famille")["qte"].sum())
 
-        # -----------------------------
-        # PAR PRODUIT
-        # -----------------------------
-        st.subheader("📦 Produits")
+        # =====================================================
+        # 2. TABLE FAMILLE
+        # =====================================================
+        st.subheader("🏷️ Vente par famille")
 
-        prod = df.groupby("Produit")["qte"].sum().reset_index()
-        st.dataframe(prod)
+        st.dataframe(df.groupby("Famille")["qte"].sum().reset_index())
 
-        # -----------------------------
-        # PAR POS
-        # -----------------------------
-        st.subheader("🏪 Performance POS")
+        # =====================================================
+        # 3. FAMILLE × PRODUIT
+        # =====================================================
+        st.subheader("📦 Famille × Produit")
 
-        pos = df.groupby("Code_POS")["qte"].sum().reset_index()
-        st.dataframe(pos)
-        st.bar_chart(pos.set_index("Code_POS"))
-
-        # -----------------------------
-        # FAMILLE x POS
-        # -----------------------------
-        st.subheader("📊 Famille par POS")
-
-        pivot = df.pivot_table(
-            index="Code_POS",
-            columns="Famille",
-            values="qte",
-            aggfunc="sum",
-            fill_value=0
+        st.dataframe(
+            df.groupby(["Famille", "Produit"])["qte"].sum().reset_index()
         )
 
-        st.dataframe(pivot)
-
-        # -----------------------------
-        # VENDEURS
-        # -----------------------------
-        st.subheader("👤 Vendeurs")
+        # =====================================================
+        # 4. VENDEURS
+        # =====================================================
+        st.subheader("👤 Ventes par vendeur")
 
         st.bar_chart(df.groupby("Code_Vendeur")["qte"].sum())
 
-        # -----------------------------
-        # EVOLUTION
-        # -----------------------------
-        st.subheader("📈 Evolution")
+        st.dataframe(
+            df.groupby("Code_Vendeur")["qte"].sum().reset_index()
+        )
 
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-        st.line_chart(df.groupby(df["Date"].dt.date)["qte"].sum())
+        # =====================================================
+        # 5. POS
+        # =====================================================
+        st.subheader("🏪 Ventes par POS")
 
-        # -----------------------------
-        # DETAIL
-        # -----------------------------
-        st.subheader("📜 Détail")
+        st.bar_chart(df.groupby("Code_POS")["qte"].sum())
 
-        st.dataframe(df)
+        st.dataframe(
+            df.groupby("Code_POS")["qte"].sum().reset_index()
+        )
+
+        # =====================================================
+        # 6. POS × FAMILLE
+        # =====================================================
+        st.subheader("📊 POS × Famille")
+
+        st.dataframe(
+            df.pivot_table(
+                index="Code_POS",
+                columns="Famille",
+                values="qte",
+                aggfunc="sum",
+                fill_value=0
+            )
+        )
