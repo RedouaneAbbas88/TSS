@@ -8,7 +8,7 @@ import uuid
 # -----------------------------
 # CONFIG
 # -----------------------------
-st.set_page_config(page_title="TSS - Ventes & Dashboard", layout="wide")
+st.set_page_config(page_title="TSS - Ventes", layout="wide")
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -67,18 +67,21 @@ if not st.session_state.logged_in:
         if df_users.empty:
             st.sidebar.error("Feuille utilisateurs vide")
         else:
-            user = df_users[df_users["Email"] == email]
+            df_users.columns = df_users.columns.str.strip()
+
+            user = df_users[df_users["Email"].astype(str).str.strip() == email.strip()]
 
             if user.empty:
                 st.sidebar.error("Email incorrect")
             else:
                 user = user.iloc[0]
-                if str(user["Password"]) != password:
+                if str(user["Password"]).strip() != password.strip():
                     st.sidebar.error("Mot de passe incorrect")
                 else:
                     st.session_state.logged_in = True
                     st.session_state.user_name = user.get("Nom", "User")
                     st.session_state.user_code = user.get("Code_Vendeur", "")
+                    st.session_state.user_role = str(user.get("Role", "Vendeur")).strip().lower()
                     st.success("Connecté")
 
 # -----------------------------
@@ -98,7 +101,7 @@ if st.session_state.logged_in:
                 break
 
     # -----------------------------
-    # SAISIE VENTES
+    # SAISIE VENTES (TOUT LE MONDE)
     # -----------------------------
     st.header("🛒 Saisie des ventes")
 
@@ -154,47 +157,63 @@ if st.session_state.logged_in:
             st.session_state.lignes = []
 
     # -----------------------------
-    # DASHBOARD
+    # VENDEUR → SES VENTES
     # -----------------------------
-    st.markdown("---")
-    st.header("📊 Dashboard")
-
     df_ventes = load_sheet(SHEET_VENTES)
 
-    if df_ventes.empty:
-        st.warning("Aucune donnée disponible")
-    else:
-        df_ventes['Quantite'] = pd.to_numeric(df_ventes['Quantite'], errors='coerce').fillna(0)
-        df_ventes['Date'] = pd.to_datetime(df_ventes['Date'], errors='coerce')
+    if st.session_state.user_role == "vendeur":
+        st.markdown("---")
+        st.header("📜 Mes ventes")
 
-        # KPI
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total produits vendus", int(df_ventes['Quantite'].sum()))
-        col2.metric("Nombre de ventes", len(df_ventes))
-        col3.metric("Commerciaux actifs", df_ventes['Code_Vendeur'].nunique())
-
-        # Filtre date
-        st.markdown("### 📅 Filtre")
-        date_range = st.date_input("Période", [])
-
-        if len(date_range) == 2:
-            df_ventes = df_ventes[
-                (df_ventes['Date'] >= pd.to_datetime(date_range[0])) &
-                (df_ventes['Date'] <= pd.to_datetime(date_range[1]))
+        if not df_ventes.empty:
+            df_user = df_ventes[
+                df_ventes["Code_Vendeur"].astype(str).str.strip() == str(st.session_state.user_code).strip()
             ]
 
-        # Top produits
-        st.markdown("### 🏆 Top Produits")
-        st.bar_chart(df_ventes.groupby('Produit')['Quantite'].sum().sort_values(ascending=False))
+            if df_user.empty:
+                st.info("Aucune vente pour vous")
+            else:
+                st.dataframe(df_user.sort_values(by="Date", ascending=False), use_container_width=True)
 
-        # Performance vendeurs
-        st.markdown("### 🧑‍💼 Performance commerciaux")
-        st.bar_chart(df_ventes.groupby('Code_Vendeur')['Quantite'].sum())
+    # -----------------------------
+    # ADMIN → DASHBOARD
+    # -----------------------------
+    if st.session_state.user_role == "admin":
 
-        # Evolution
-        st.markdown("### 📈 Evolution")
-        st.line_chart(df_ventes.groupby(df_ventes['Date'].dt.date)['Quantite'].sum())
+        st.markdown("---")
+        st.header("📊 Dashboard Admin")
 
-        # Table
-        st.markdown("### 📜 Détail")
-        st.dataframe(df_ventes.sort_values(by="Date", ascending=False), use_container_width=True)
+        if df_ventes.empty:
+            st.warning("Aucune donnée dans Ventes")
+        else:
+            df_ventes.columns = df_ventes.columns.str.strip()
+
+            if "Quantite" not in df_ventes.columns or "Date" not in df_ventes.columns:
+                st.error("Colonnes manquantes")
+            else:
+                df_ventes["Quantite"] = pd.to_numeric(df_ventes["Quantite"], errors="coerce").fillna(0)
+                df_ventes["Date"] = pd.to_datetime(df_ventes["Date"], errors="coerce")
+
+                df_ventes = df_ventes.dropna(subset=["Date"])
+
+                # KPI
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Total Produits", int(df_ventes["Quantite"].sum()))
+                col2.metric("Nb Ventes", len(df_ventes))
+                col3.metric("Vendeurs actifs", df_ventes["Code_Vendeur"].nunique())
+
+                # Top produits
+                st.markdown("### 🏆 Top Produits")
+                st.bar_chart(df_ventes.groupby("Produit")["Quantite"].sum().sort_values(ascending=False))
+
+                # Vendeurs
+                st.markdown("### 🧑‍💼 Performance")
+                st.bar_chart(df_ventes.groupby("Code_Vendeur")["Quantite"].sum())
+
+                # Evolution
+                st.markdown("### 📈 Evolution")
+                st.line_chart(df_ventes.groupby(df_ventes["Date"].dt.date)["Quantite"].sum())
+
+                # Table
+                st.markdown("### 📜 Détail")
+                st.dataframe(df_ventes.sort_values(by="Date", ascending=False), use_container_width=True)
