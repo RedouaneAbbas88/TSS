@@ -84,12 +84,11 @@ if st.session_state.logged_in:
     df_ventes = load_sheet(SHEET_VENTES)
     df_produits = load_sheet(SHEET_PRODUITS)
 
-    # CLEAN
     if not df_ventes.empty:
         df_ventes["qte"] = pd.to_numeric(df_ventes["qte"], errors="coerce").fillna(0)
 
     # =====================================================
-    # VENDEUR
+    # VENDEUR (FAMILLE → PRODUIT)
     # =====================================================
     if st.session_state.role == "vendeur":
 
@@ -99,19 +98,19 @@ if st.session_state.logged_in:
             st.error("Table Produits vide")
         else:
 
-            # Liste produits
-            produits = df_produits["Nom Produit"].dropna().tolist()
+            # 🔥 LISTE FAMILLES
+            familles = sorted(df_produits["Famille"].dropna().unique())
 
             with st.form("form_vente"):
 
-                produit = st.selectbox("Produit", produits)
+                famille = st.selectbox("Famille", familles)
 
-                # 🔥 AUTO FAMILLE
-                famille = df_produits[
-                    df_produits["Nom Produit"] == produit
-                ]["Famille"].values[0]
+                # 🔥 PRODUITS FILTRÉS PAR FAMILLE
+                produits_filtrés = df_produits[
+                    df_produits["Famille"] == famille
+                ]["Nom Produit"].dropna().tolist()
 
-                st.text_input("Famille", value=famille, disabled=True)
+                produit = st.selectbox("Produit", produits_filtrés)
 
                 col1, col2 = st.columns(2)
 
@@ -157,7 +156,7 @@ if st.session_state.logged_in:
             st.dataframe(my, use_container_width=True)
 
     # =====================================================
-    # ADMIN (inchangé)
+    # ADMIN (INCHANGÉ)
     # =====================================================
     if st.session_state.role == "admin":
 
