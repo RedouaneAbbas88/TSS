@@ -87,14 +87,14 @@ if st.session_state.logged_in:
     df_produits = load_sheet(SHEET_PRODUITS)
     df_pos = load_sheet(SHEET_POS)
 
-    # CLEAN DATA
+    # CLEAN
     if not df_produits.empty:
-        df_produits["Famille"] = df_produits["Famille"].astype(str).str.strip().str.lower()
+        df_produits["Famille"] = df_produits["Famille"].astype(str).str.strip()
         df_produits["Nom Produit"] = df_produits["Nom Produit"].astype(str).str.strip()
 
     if not df_ventes.empty:
-        df_ventes["Famille"] = df_ventes["Famille"].astype(str).str.strip().str.lower()
         df_ventes["qte"] = pd.to_numeric(df_ventes["qte"], errors="coerce").fillna(0)
+        df_ventes["Famille"] = df_ventes["Famille"].astype(str).str.strip()
 
     # =====================================================
     # VENDEUR
@@ -103,48 +103,58 @@ if st.session_state.logged_in:
 
         st.header("🛒 Saisie des ventes")
 
-        if df_produits.empty:
-            st.error("Table Produits vide")
-            st.stop()
+        familles = sorted(df_produits["Famille"].unique())
 
-        # 🔥 LISTE FAMILLES PROPRES
-        familles = sorted(df_produits["Famille"].dropna().unique())
+        if "famille_selected" not in st.session_state:
+            st.session_state.famille_selected = familles[0]
 
-        # ROUTING POS
-        pos_options = []
-        if not df_pos.empty:
-            df_pos["Date_Visite"] = pd.to_datetime(df_pos["Date_Visite"], errors="coerce").dt.date
-            today = datetime.now().date()
+        if "produit_selected" not in st.session_state:
+            st.session_state.produit_selected = ""
 
-            df_today = df_pos[
-                (df_pos["Code_Animateur"].astype(str).str.strip() == st.session_state.user_code)
-                & (df_pos["Date_Visite"] == today)
-            ]
-
-            pos_options = df_today["Code_POS"].dropna().tolist()
+        def reset_produit():
+            st.session_state.produit_selected = ""
 
         with st.form("form_vente"):
 
-            # FAMILLE
-            famille = st.selectbox("Famille", familles)
+            famille = st.selectbox(
+                "Famille",
+                familles,
+                key="famille_selected",
+                on_change=reset_produit
+            )
 
-            # 🔥 PRODUITS FILTRÉS CORRECTEMENT
             produits = df_produits[
-                df_produits["Famille"] == famille
+                df_produits["Famille"] == st.session_state.famille_selected
             ]["Nom Produit"].tolist()
 
-            produit = st.selectbox("Produit", produits)
+            produit = st.selectbox(
+                "Produit",
+                produits,
+                key="produit_selected"
+            )
 
-            # POS
+            # ROUTING POS
+            pos_options = []
+            if not df_pos.empty:
+                df_pos["Date_Visite"] = pd.to_datetime(df_pos["Date_Visite"], errors="coerce").dt.date
+                today = datetime.now().date()
+
+                df_today = df_pos[
+                    (df_pos["Code_Animateur"].astype(str).str.strip() == st.session_state.user_code)
+                    & (df_pos["Date_Visite"] == today)
+                ]
+
+                pos_options = df_today["Code_POS"].dropna().tolist()
+
             if pos_options:
-                code_pos = st.selectbox("POS (plan du jour)", pos_options)
+                code_pos = st.selectbox("POS", pos_options)
             else:
                 code_pos = st.text_input("Code POS")
 
             col1, col2 = st.columns(2)
 
             with col1:
-                qte = st.number_input("Quantité", min_value=1, step=1)
+                qte = st.number_input("Quantité", min_value=1)
 
             with col2:
                 client_nom = st.text_input("Nom Client")
@@ -153,39 +163,37 @@ if st.session_state.logged_in:
             submit = st.form_submit_button("Enregistrer")
 
             if submit:
+
                 ws = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_VENTES)
 
-                row = [
+                ws.append_row([
                     str(uuid.uuid4()),
                     str(datetime.now()),
                     st.session_state.user_code,
                     code_pos,
                     client_nom,
                     telephone,
-                    famille,
-                    produit,
+                    st.session_state.famille_selected,
+                    st.session_state.produit_selected,
                     int(qte)
-                ]
-
-                ws.append_row(row)
+                ])
 
                 st.success("✅ Vente enregistrée")
 
-        # HISTORIQUE
         st.subheader("📋 Mes ventes")
+
         if not df_ventes.empty:
-            my = df_ventes[df_ventes["Code_Vendeur"] == st.session_state.user_code]
-            st.dataframe(my)
+            st.dataframe(df_ventes[df_ventes["Code_Vendeur"] == st.session_state.user_code])
 
     # =====================================================
-    # ADMIN
+    # ADMIN DASHBOARD
     # =====================================================
     if st.session_state.role == "admin":
 
         st.header("📊 Dashboard Admin")
 
         if df_ventes.empty:
-            st.warning("Aucune donnée disponible")
+            st.warning("Aucune donnée")
             st.stop()
 
         df = df_ventes.copy()
@@ -200,11 +208,46 @@ if st.session_state.logged_in:
         st.subheader("📈 Ventes par famille")
         st.bar_chart(df.groupby("Famille")["qte"].sum())
 
-        # FAMILLE × PRODUIT
+        # =====================================================
+        # 🔥 FAMILLE × PRODUIT + SOUS TOTAL + TOTAL
+        # =====================================================
         st.subheader("📦 Famille × Produit")
-        st.dataframe(df.groupby(["Famille","Produit"])["qte"].sum().reset_index())
 
-        # POS × FAMILLE + TOTAL
+        df_group = df.groupby(["Famille", "Produit"])["qte"].sum().reset_index()
+
+        rows = []
+        total_global = 0
+
+        for fam in df_group["Famille"].unique():
+
+            df_fam = df_group[df_group["Famille"] == fam]
+
+            for _, r in df_fam.iterrows():
+                rows.append({
+                    "Famille": fam,
+                    "Produit": r["Produit"],
+                    "Quantité": r["qte"]
+                })
+
+            sous_total = df_fam["qte"].sum()
+            total_global += sous_total
+
+            rows.append({
+                "Famille": fam,
+                "Produit": "🔹 Sous-total",
+                "Quantité": sous_total
+            })
+
+        # TOTAL GLOBAL
+        rows.append({
+            "Famille": "TOTAL",
+            "Produit": "",
+            "Quantité": total_global
+        })
+
+        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+        # POS × FAMILLE
         st.subheader("🏪 POS × Famille")
 
         df_pos = df.pivot_table(
@@ -219,10 +262,10 @@ if st.session_state.logged_in:
 
         st.dataframe(df_pos)
 
-        # VENDEUR × FAMILLE + TOTAL
+        # VENDEUR × FAMILLE
         st.subheader("👤 Vendeur × Famille")
 
-        df_vendeur = df.pivot_table(
+        df_vend = df.pivot_table(
             index="Code_Vendeur",
             columns="Famille",
             values="qte",
@@ -230,6 +273,6 @@ if st.session_state.logged_in:
             fill_value=0
         )
 
-        df_vendeur["Total Quantité"] = df_vendeur.sum(axis=1)
+        df_vend["Total Quantité"] = df_vend.sum(axis=1)
 
-        st.dataframe(df_vendeur)
+        st.dataframe(df_vend)
