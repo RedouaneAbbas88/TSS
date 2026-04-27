@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
+import uuid
 
 # =====================================================
 # CONFIG
@@ -24,9 +25,10 @@ SPREADSHEET_ID = "1SN02jxpV2oyc3tWItY9c2Kc_UEXfqTdtQSL9WgGAi3w"
 
 SHEET_USERS = "Utilisateurs"
 SHEET_VENTES = "Ventes"
+SHEET_PRODUITS = "Produits"
 
 # =====================================================
-# LOAD DATA
+# LOAD
 # =====================================================
 def load_sheet(name):
     try:
@@ -79,51 +81,64 @@ if st.session_state.logged_in:
 
     st.title(f"📊 Dashboard TSS - {st.session_state.user_name}")
 
-    df = load_sheet(SHEET_VENTES)
+    df_ventes = load_sheet(SHEET_VENTES)
+    df_produits = load_sheet(SHEET_PRODUITS)
 
-    # =====================================================
     # CLEAN
-    # =====================================================
-    if not df.empty:
-        df.columns = df.columns.str.strip()
-        df["qte"] = pd.to_numeric(df["qte"], errors="coerce").fillna(0)
+    if not df_ventes.empty:
+        df_ventes["qte"] = pd.to_numeric(df_ventes["qte"], errors="coerce").fillna(0)
 
     # =====================================================
-    # VENDEUR (SAISIE + HISTORIQUE)
+    # VENDEUR
     # =====================================================
     if st.session_state.role == "vendeur":
 
         st.header("🛒 Saisie des ventes")
 
-        with st.form("form_vente"):
+        if df_produits.empty:
+            st.error("Table Produits vide")
+        else:
 
-            col1, col2 = st.columns(2)
+            # Liste produits
+            produits = df_produits["Nom Produit"].dropna().tolist()
 
-            with col1:
-                produit = st.text_input("Produit")
-                famille = st.text_input("Famille")
+            with st.form("form_vente"):
 
-            with col2:
-                qte = st.number_input("Quantité", min_value=1, step=1)
-                code_pos = st.text_input("Code POS (optionnel)")
+                produit = st.selectbox("Produit", produits)
 
-            submit = st.form_submit_button("Enregistrer")
+                # 🔥 AUTO FAMILLE
+                famille = df_produits[
+                    df_produits["Nom Produit"] == produit
+                ]["Famille"].values[0]
 
-            if submit:
+                st.text_input("Famille", value=famille, disabled=True)
 
-                if produit == "" or famille == "":
-                    st.error("Produit et Famille obligatoires")
-                else:
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    qte = st.number_input("Quantité", min_value=1, step=1)
+                    code_pos = st.text_input("Code POS")
+
+                with col2:
+                    client_nom = st.text_input("Nom Client")
+                    telephone = st.text_input("Téléphone")
+
+                submit = st.form_submit_button("Enregistrer")
+
+                if submit:
+
                     try:
-                        sh = client.open_by_key(SPREADSHEET_ID)
-                        ws = sh.worksheet(SHEET_VENTES)
+                        ws = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_VENTES)
 
                         row = [
+                            str(uuid.uuid4()),
                             str(pd.Timestamp.now()),
                             st.session_state.user_code,
                             code_pos,
-                            produit,
+                            client_nom,
+                            telephone,
                             famille,
+                            produit,
                             int(qte)
                         ]
 
@@ -134,25 +149,26 @@ if st.session_state.logged_in:
                     except Exception as e:
                         st.error(f"Erreur : {e}")
 
-        # =========================
-        # HISTORIQUE VENDEUR
-        # =========================
+        # HISTORIQUE
         st.subheader("📋 Mes ventes")
 
-        if not df.empty:
-            my = df[df["Code_Vendeur"] == st.session_state.user_code]
+        if not df_ventes.empty:
+            my = df_ventes[df_ventes["Code_Vendeur"] == st.session_state.user_code]
             st.dataframe(my, use_container_width=True)
 
     # =====================================================
-    # ADMIN DASHBOARD (INCHANGÉ)
+    # ADMIN (inchangé)
     # =====================================================
     if st.session_state.role == "admin":
 
         st.header("📊 Dashboard Admin")
 
-        if df.empty:
+        if df_ventes.empty:
             st.warning("Aucune donnée disponible")
             st.stop()
+
+        df = df_ventes.copy()
+        df["qte"] = pd.to_numeric(df["qte"], errors="coerce").fillna(0)
 
         # KPI
         c1, c2, c3 = st.columns(3)
@@ -160,77 +176,19 @@ if st.session_state.logged_in:
         c2.metric("Nb ventes", len(df))
         c3.metric("Vendeurs actifs", df["Code_Vendeur"].nunique())
 
-        # GRAPHE FAMILLE
+        # GRAPHE
         st.subheader("📈 Ventes par famille")
-
         fam = df.groupby("Famille")["qte"].sum()
-        st.markdown(f"### 🔢 Total global : {int(fam.sum())}")
         st.bar_chart(fam)
 
         # FAMILLE × PRODUIT
         st.subheader("📦 Famille × Produit")
-
-        df_fp = df.groupby(["Famille", "Produit"])["qte"].sum().reset_index()
-
-        rows = []
-        for fam_name in df_fp["Famille"].unique():
-            df_fam = df_fp[df_fp["Famille"] == fam_name]
-
-            for _, r in df_fam.iterrows():
-                rows.append({
-                    "Famille": fam_name,
-                    "Produit": "   ↳ " + str(r["Produit"]),
-                    "Quantité": r["qte"],
-                    "type": "detail"
-                })
-
-            rows.append({
-                "Famille": fam_name,
-                "Produit": "🔹 Sous-total",
-                "Quantité": df_fam["qte"].sum(),
-                "type": "total"
-            })
-
-        df_display = pd.DataFrame(rows)
-
-        def style(row):
-            if str(row.get("type", "")) == "total":
-                return ["background-color:#d9edf7; font-weight:bold"] * len(row)
-            return [""] * len(row)
-
-        st.dataframe(
-            df_display.drop(columns=["type"]).style.apply(style, axis=1),
-            use_container_width=True
-        )
+        st.dataframe(df.groupby(["Famille","Produit"])["qte"].sum().reset_index())
 
         # POS × FAMILLE
         st.subheader("🏪 POS × Famille")
-
-        df_pos = df.pivot_table(
-            index="Code_POS",
-            columns="Famille",
-            values="qte",
-            aggfunc="sum",
-            fill_value=0
-        )
-
-        df_pos["Total Quantité"] = df_pos.sum(axis=1)
-        df_pos = df_pos.sort_values("Total Quantité", ascending=False)
-
-        st.dataframe(df_pos, use_container_width=True)
+        st.dataframe(df.pivot_table(index="Code_POS", columns="Famille", values="qte", aggfunc="sum", fill_value=0))
 
         # VENDEUR × FAMILLE
         st.subheader("👤 Vendeur × Famille")
-
-        df_vend = df.pivot_table(
-            index="Code_Vendeur",
-            columns="Famille",
-            values="qte",
-            aggfunc="sum",
-            fill_value=0
-        )
-
-        df_vend["Total Quantité"] = df_vend.sum(axis=1)
-        df_vend = df_vend.sort_values("Total Quantité", ascending=False)
-
-        st.dataframe(df_vend, use_container_width=True)
+        st.dataframe(df.pivot_table(index="Code_Vendeur", columns="Famille", values="qte", aggfunc="sum", fill_value=0))
