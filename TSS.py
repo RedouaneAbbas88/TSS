@@ -273,7 +273,7 @@ if st.session_state.logged_in:
         st.subheader("👤 Vendeur × Famille")
 
         df_vend = df.pivot_table(
-            index="Code_Vendeur",
+            index="Nom",
             columns="Famille",
             values="qte",
             aggfunc="sum",
