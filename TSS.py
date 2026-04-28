@@ -269,17 +269,35 @@ if st.session_state.logged_in:
 
         st.dataframe(df_pos)
 
-        # VENDEUR × FAMILLE
-        st.subheader("👤 Vendeur × Famille")
+       # VENDEUR × FAMILLE
+st.subheader("👤 Vendeur × Famille")
 
-        df_vend = df.pivot_table(
-            index="Code_Vendeur",
-            columns="Famille",
-            values="qte",
-            aggfunc="sum",
-            fill_value=0
-        )
+# Charger table utilisateurs
+df_users = load_sheet(SHEET_USERS)
 
-        df_vend["Total Quantité"] = df_vend.sum(axis=1)
+if not df_users.empty:
+    df_users["Code_Vendeur"] = df_users["Code_Vendeur"].astype(str).str.strip()
+    df_users["Nom"] = df_users["Nom"].astype(str).str.strip()
 
-        st.dataframe(df_vend)
+    df["Code_Vendeur"] = df["Code_Vendeur"].astype(str).str.strip()
+
+    # Merge pour récupérer le nom
+    df_merge = df.merge(
+        df_users[["Code_Vendeur", "Nom"]],
+        on="Code_Vendeur",
+        how="left"
+    )
+
+    df_merge["Nom"] = df_merge["Nom"].fillna("Inconnu")
+
+    df_vend = df_merge.pivot_table(
+        index="Nom",
+        columns="Famille",
+        values="qte",
+        aggfunc="sum",
+        fill_value=0
+    )
+
+    df_vend["Total Quantité"] = df_vend.sum(axis=1)
+
+    st.dataframe(df_vend)
