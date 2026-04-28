@@ -95,6 +95,7 @@ if st.session_state.logged_in:
     if not df_ventes.empty:
         df_ventes["qte"] = pd.to_numeric(df_ventes["qte"], errors="coerce").fillna(0)
         df_ventes["Famille"] = df_ventes["Famille"].astype(str).str.strip()
+        df_ventes.columns = df_ventes.columns.str.strip()
 
     # =====================================================
     # VENDEUR
@@ -109,18 +110,15 @@ if st.session_state.logged_in:
 
         familles = sorted(df_produits["Famille"].dropna().unique())
 
-        # INIT STATE
         if "famille_selected" not in st.session_state:
             st.session_state.famille_selected = familles[0]
 
-        # FAMILLE
         famille = st.selectbox(
             "Famille",
             familles,
             key="famille_selected"
         )
 
-        # PRODUITS filtrés correctement
         produits = df_produits[
             df_produits["Famille"] == famille
         ]["Nom Produit"].tolist()
@@ -129,7 +127,6 @@ if st.session_state.logged_in:
             st.warning("Aucun produit dans cette famille")
             st.stop()
 
-        # reset produit si invalide
         if "produit_selected" not in st.session_state or st.session_state.produit_selected not in produits:
             st.session_state.produit_selected = produits[0]
 
@@ -139,7 +136,6 @@ if st.session_state.logged_in:
             key="produit_selected"
         )
 
-        # ROUTING POS
         pos_options = []
         if not df_pos.empty:
             df_pos["Date_Visite"] = pd.to_datetime(df_pos["Date_Visite"], errors="coerce").dt.date
@@ -216,9 +212,7 @@ if st.session_state.logged_in:
         st.subheader("📈 Ventes par famille")
         st.bar_chart(df.groupby("Famille")["qte"].sum())
 
-        # =====================================================
-        # 📦 FAMILLE × PRODUIT + SOUS TOTAL + TOTAL
-        # =====================================================
+        # FAMILLE × PRODUIT
         st.subheader("📦 Famille × Produit")
 
         df_gp = df.groupby(["Famille", "Produit"])["qte"].sum().reset_index()
@@ -269,35 +263,38 @@ if st.session_state.logged_in:
 
         st.dataframe(df_pos)
 
-       # VENDEUR × FAMILLE
-st.subheader("👤 Vendeur × Famille")
+        # =====================================================
+        # ✅ VENDEUR × FAMILLE (MODIFIÉ)
+        # =====================================================
+        st.subheader("👤 Vendeur × Famille")
 
-# Charger table utilisateurs
-df_users = load_sheet(SHEET_USERS)
+        df_users = load_sheet(SHEET_USERS)
 
-if not df_users.empty:
-    df_users["Code_Vendeur"] = df_users["Code_Vendeur"].astype(str).str.strip()
-    df_users["Nom"] = df_users["Nom"].astype(str).str.strip()
+        if not df_users.empty:
+            df_users["Code_Vendeur"] = df_users["Code_Vendeur"].astype(str).str.strip()
+            df_users["Nom"] = df_users["Nom"].astype(str).str.strip()
 
-    df["Code_Vendeur"] = df["Code_Vendeur"].astype(str).str.strip()
+            if "Code_Vendeur" in df.columns:
+                df["Code_Vendeur"] = df["Code_Vendeur"].astype(str).str.strip()
 
-    # Merge pour récupérer le nom
-    df_merge = df.merge(
-        df_users[["Code_Vendeur", "Nom"]],
-        on="Code_Vendeur",
-        how="left"
-    )
+                df_merge = df.merge(
+                    df_users[["Code_Vendeur", "Nom"]],
+                    on="Code_Vendeur",
+                    how="left"
+                )
 
-    df_merge["Nom"] = df_merge["Nom"].fillna("Inconnu")
+                df_merge["Nom"] = df_merge["Nom"].fillna("Inconnu")
 
-    df_vend = df_merge.pivot_table(
-        index="Nom",
-        columns="Famille",
-        values="qte",
-        aggfunc="sum",
-        fill_value=0
-    )
+                df_vend = df_merge.pivot_table(
+                    index="Nom",
+                    columns="Famille",
+                    values="qte",
+                    aggfunc="sum",
+                    fill_value=0
+                )
 
-    df_vend["Total Quantité"] = df_vend.sum(axis=1)
+                df_vend["Total Quantité"] = df_vend.sum(axis=1)
 
-    st.dataframe(df_vend)
+                st.dataframe(df_vend)
+            else:
+                st.error("Colonne Code_Vendeur introuvable dans Ventes")
