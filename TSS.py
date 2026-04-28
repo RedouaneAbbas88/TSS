@@ -81,7 +81,7 @@ if not st.session_state.logged_in:
 # =====================================================
 if st.session_state.logged_in:
 
-    st.title(f"📊 TSS - {st.session_state.user_name}")
+    st.title(f"📊 365 DAYS - {st.session_state.user_name}")
 
     df_ventes = load_sheet(SHEET_VENTES)
     df_produits = load_sheet(SHEET_PRODUITS)
