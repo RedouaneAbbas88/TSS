@@ -113,15 +113,9 @@ if st.session_state.logged_in:
         if "famille_selected" not in st.session_state:
             st.session_state.famille_selected = familles[0]
 
-        famille = st.selectbox(
-            "Famille",
-            familles,
-            key="famille_selected"
-        )
+        famille = st.selectbox("Famille", familles, key="famille_selected")
 
-        produits = df_produits[
-            df_produits["Famille"] == famille
-        ]["Nom Produit"].tolist()
+        produits = df_produits[df_produits["Famille"] == famille]["Nom Produit"].tolist()
 
         if not produits:
             st.warning("Aucun produit dans cette famille")
@@ -130,11 +124,7 @@ if st.session_state.logged_in:
         if "produit_selected" not in st.session_state or st.session_state.produit_selected not in produits:
             st.session_state.produit_selected = produits[0]
 
-        produit = st.selectbox(
-            "Produit",
-            produits,
-            key="produit_selected"
-        )
+        produit = st.selectbox("Produit", produits, key="produit_selected")
 
         pos_options = []
         if not df_pos.empty:
@@ -150,10 +140,7 @@ if st.session_state.logged_in:
 
         with st.form("form_vente"):
 
-            if pos_options:
-                code_pos = st.selectbox("POS (plan du jour)", pos_options)
-            else:
-                code_pos = st.text_input("Code POS")
+            code_pos = st.selectbox("POS (plan du jour)", pos_options) if pos_options else st.text_input("Code POS")
 
             col1, col2 = st.columns(2)
 
@@ -167,9 +154,7 @@ if st.session_state.logged_in:
             submit = st.form_submit_button("Enregistrer")
 
             if submit:
-
                 ws = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_VENTES)
-
                 ws.append_row([
                     str(uuid.uuid4()),
                     str(datetime.now()),
@@ -181,7 +166,6 @@ if st.session_state.logged_in:
                     produit,
                     int(qte)
                 ])
-
                 st.success("✅ Vente enregistrée")
 
         st.subheader("📋 Mes ventes")
@@ -221,51 +205,34 @@ if st.session_state.logged_in:
         total_global = 0
 
         for fam in df_gp["Famille"].unique():
-
             df_fam = df_gp[df_gp["Famille"] == fam]
 
             for _, r in df_fam.iterrows():
-                rows.append({
-                    "Famille": fam,
-                    "Produit": r["Produit"],
-                    "Quantité": r["qte"]
-                })
+                rows.append({"Famille": fam, "Produit": r["Produit"], "Quantité": r["qte"]})
 
             sous_total = df_fam["qte"].sum()
             total_global += sous_total
 
-            rows.append({
-                "Famille": fam,
-                "Produit": "🔹 Sous-total",
-                "Quantité": sous_total
-            })
+            rows.append({"Famille": fam, "Produit": "🔹 Sous-total", "Quantité": sous_total})
 
-        rows.append({
-            "Famille": "TOTAL GLOBAL",
-            "Produit": "",
-            "Quantité": total_global
-        })
+        rows.append({"Famille": "TOTAL GLOBAL", "Produit": "", "Quantité": total_global})
 
         st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
         # POS × FAMILLE
         st.subheader("🏪 POS × Famille")
 
-        df_pos = df.pivot_table(
-            index="Code_POS",
-            columns="Famille",
-            values="qte",
-            aggfunc="sum",
-            fill_value=0
-        )
-
+        df_pos = df.pivot_table(index="Code_POS", columns="Famille", values="qte", aggfunc="sum", fill_value=0)
         df_pos["Total Quantité"] = df_pos.sum(axis=1)
+
+        total_row = df_pos.sum(axis=0)
+        total_row.name = "TOTAL"
+
+        df_pos = pd.concat([df_pos, total_row.to_frame().T])
 
         st.dataframe(df_pos)
 
-        # =====================================================
-        # ✅ VENDEUR × FAMILLE (MODIFIÉ)
-        # =====================================================
+        # VENDEUR × FAMILLE
         st.subheader("👤 Vendeur × Famille")
 
         df_users = load_sheet(SHEET_USERS)
@@ -277,12 +244,7 @@ if st.session_state.logged_in:
             if "Code_Vendeur" in df.columns:
                 df["Code_Vendeur"] = df["Code_Vendeur"].astype(str).str.strip()
 
-                df_merge = df.merge(
-                    df_users[["Code_Vendeur", "Nom"]],
-                    on="Code_Vendeur",
-                    how="left"
-                )
-
+                df_merge = df.merge(df_users[["Code_Vendeur", "Nom"]], on="Code_Vendeur", how="left")
                 df_merge["Nom"] = df_merge["Nom"].fillna("Inconnu")
 
                 df_vend = df_merge.pivot_table(
@@ -294,6 +256,11 @@ if st.session_state.logged_in:
                 )
 
                 df_vend["Total Quantité"] = df_vend.sum(axis=1)
+
+                total_row = df_vend.sum(axis=0)
+                total_row.name = "TOTAL"
+
+                df_vend = pd.concat([df_vend, total_row.to_frame().T])
 
                 st.dataframe(df_vend)
             else:
