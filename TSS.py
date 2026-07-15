@@ -40,7 +40,9 @@ def load_sheet(name):
         if not df.empty:
             df.columns = df.columns.str.strip()
         return df
-    except:
+    except Exception as e:
+        # Optionnel: décommenter pour débugger les erreurs d'accès aux feuilles
+        # st.sidebar.error(f"Erreur chargement {name}: {e}")
         return pd.DataFrame()
 
 # =====================================================
@@ -52,29 +54,39 @@ if "logged_in" not in st.session_state:
 st.sidebar.header("Connexion")
 
 if not st.session_state.logged_in:
+    # 1. Charger d'abord la liste des utilisateurs pour remplir la liste déroulante
+    users = load_sheet(SHEET_USERS)
+    
+    if not users.empty:
+        # Nettoyer les noms pour éviter les espaces en trop
+        users["Nom"] = users["Nom"].astype(str).str.strip()
+        # Trier les noms par ordre alphabétique pour que ce soit plus propre
+        liste_noms = sorted(users["Nom"].unique())
+        
+        # 2. Liste déroulante pour le nom
+        nom_selectionne = st.sidebar.selectbox("Choisir votre nom", liste_noms)
+        password = st.sidebar.text_input("Password", type="password")
 
-    email = st.sidebar.text_input("Email")
-    password = st.sidebar.text_input("Password", type="password")
+        if st.sidebar.button("Login"):
+            # 3. Filtrer l'utilisateur sélectionné
+            user = users[users["Nom"] == nom_selectionne]
 
-    if st.sidebar.button("Login"):
-
-        users = load_sheet(SHEET_USERS)
-
-        user = users[users["Email"].astype(str).str.strip() == email.strip()]
-
-        if user.empty:
-            st.sidebar.error("Email incorrect")
-        else:
-            user = user.iloc[0]
-
-            if str(user["Password"]).strip() != password.strip():
-                st.sidebar.error("Mot de passe incorrect")
+            if user.empty:
+                st.sidebar.error("Utilisateur introuvable")
             else:
-                st.session_state.logged_in = True
-                st.session_state.role = str(user["Role"]).lower().strip()
-                st.session_state.user_code = str(user["Code_Vendeur"]).strip()
-                st.session_state.user_name = user["Nom"]
-                st.rerun()
+                user = user.iloc[0]
+
+                # Vérification du mot de passe
+                if str(user["Password"]).strip() != password.strip():
+                    st.sidebar.error("Mot de passe incorrect")
+                else:
+                    st.session_state.logged_in = True
+                    st.session_state.role = str(user["Role"]).lower().strip()
+                    st.session_state.user_code = str(user["Code_Vendeur"]).strip()
+                    st.session_state.user_name = user["Nom"]
+                    st.rerun()
+    else:
+        st.sidebar.error("Impossible de charger la liste des utilisateurs depuis Google Sheets.")
 
 # =====================================================
 # APP
