@@ -72,36 +72,83 @@ def get_client():
 client = get_client()
 
 
+def get_spreadsheet():
+    """Ouvre le fichier Google Sheets et retourne une erreur lisible."""
+    try:
+        return client.open_by_key(SPREADSHEET_ID)
+    except gspread.exceptions.APIError as e:
+        st.error(
+            "❌ Impossible d'accéder au Google Sheet.\n\n"
+            "Vérifiez les points suivants :\n"
+            "1. Le SPREADSHEET_ID est correct.\n"
+            "2. Le fichier Google Sheets est partagé avec le compte de service présent dans st.secrets['google'].\n"
+            "3. Le compte de service dispose du droit Éditeur.\n\n"
+            f"Détail Google API : {e}"
+        )
+        raise
+    except Exception as e:
+        st.error(
+            "❌ Erreur lors de l'ouverture du Google Sheet :\n\n"
+            f"{e}"
+        )
+        raise
+
+
 def get_ws(sheet_name):
-    return client.open_by_key(SPREADSHEET_ID).worksheet(sheet_name)
+    """Retourne une feuille et signale clairement si son nom est incorrect."""
+    spreadsheet = get_spreadsheet()
+
+    try:
+        return spreadsheet.worksheet(sheet_name)
+    except gspread.exceptions.WorksheetNotFound:
+        available = [ws.title for ws in spreadsheet.worksheets()]
+        st.error(
+            f"❌ La feuille '{sheet_name}' n'existe pas dans le fichier Google Sheets.\n\n"
+            f"Feuilles disponibles : {', '.join(available)}"
+        )
+        raise
+    except gspread.exceptions.APIError as e:
+        st.error(
+            f"❌ Google Sheets a refusé l'accès à la feuille '{sheet_name}'.\n\n"
+            f"Détail Google API : {e}\n\n"
+            "Vérifiez le partage du fichier avec le compte de service."
+        )
+        raise
 
 
 @st.cache_data(ttl=30)
 def load_sheet(sheet_name):
-    try:
-        ws = get_ws(sheet_name)
-        data = ws.get_all_records()
-        df = pd.DataFrame(data)
+    """Charge une feuille Google Sheets."""
+    ws = get_ws(sheet_name)
+    data = ws.get_all_records()
+    df = pd.DataFrame(data)
 
-        if not df.empty:
-            df.columns = (
-                df.columns.astype(str)
-                .str.strip()
-            )
+    if not df.empty:
+        df.columns = (
+            df.columns.astype(str)
+            .str.strip()
+        )
 
-        return df
-
-    except Exception:
-        return pd.DataFrame()
+    return df
 
 
 def append_row(sheet_name, row):
-    ws = get_ws(sheet_name)
-    ws.append_row(
-        row,
-        value_input_option="USER_ENTERED"
-    )
-    load_sheet.clear()
+    """Ajoute une ligne dans une feuille Google Sheets."""
+    try:
+        ws = get_ws(sheet_name)
+        ws.append_row(
+            row,
+            value_input_option="USER_ENTERED"
+        )
+        load_sheet.clear()
+    except gspread.exceptions.APIError as e:
+        st.error(
+            f"❌ Erreur Google Sheets lors de l'enregistrement dans '{sheet_name}'.\n\n"
+            f"Détail : {e}\n\n"
+            "Si l'erreur est [403], partagez le Google Sheet avec le compte de service en Éditeur. "
+            "Si l'erreur est [404], vérifiez le SPREADSHEET_ID et le nom de la feuille."
+        )
+        raise
 
 
 def append_dict_row(sheet_name, data):
@@ -2857,4 +2904,3 @@ elif menu == "📈 Statistiques":
             st.info(
                 "Aucune donnée."
             )
-
