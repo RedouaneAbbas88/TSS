@@ -4,6 +4,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import uuid
 from datetime import datetime
+import time
 
 # =========================================================
 # CONFIGURATION
@@ -61,119 +62,123 @@ SHEET_MATERIAL_CONTROL = "Controle_Materiel"
 
 
 @st.cache_resource
-def get_client():
-    creds = Credentials.from_service_account_info(
-        st.secrets["google"],
-        scopes=SCOPES
-    )
-    return gspread.authorize(creds)
-
-
-client = get_client()
-
-
 def get_spreadsheet():
-    """Ouvre le fichier Google Sheets et retourne une erreur lisible."""
+    """Ouvre le classeur une seule fois et conserve la connexion en cache."""
     try:
         return client.open_by_key(SPREADSHEET_ID)
     except gspread.exceptions.APIError as e:
-        st.error(
-            "❌ Impossible d'accéder au Google Sheet.\n\n"
-            "Vérifiez les points suivants :\n"
-            "1. Le SPREADSHEET_ID est correct.\n"
-            "2. Le fichier Google Sheets est partagé avec le compte de service présent dans st.secrets['google'].\n"
-            "3. Le compte de service dispose du droit Éditeur.\n\n"
-            f"Détail Google API : {e}"
-        )
+        if "429" in str(e):
+            st.error(
+                "❌ Google Sheets a atteint sa limite de lectures momentanément (429).\n\n"
+                "Attendez quelques minutes avant de relancer l'application. "
+                "La version actuelle réduit fortement les lectures avec le cache et le chargement à la demande.\n\n"
+                f"Détail : {e}"
+            )
+        else:
+            st.error(
+                "❌ Impossible d'ouvrir le Google Sheet.\n\n"
+                "Vérifiez le SPREADSHEET_ID et le partage avec le compte de service.\n\n"
+                f"Détail Google API : {e}"
+            )
         raise
-    except Exception as e:
-        st.error(
-            "❌ Erreur lors de l'ouverture du Google Sheet :\n\n"
-            f"{e}"
-        )
-        raise
+
+
+@st.cache_resource
+def get_worksheets():
+    """Récupère les onglets une seule fois et les garde en cache."""
+    spreadsheet = get_spreadsheet()
+    return {ws.title: ws for ws in spreadsheet.worksheets()}
 
 
 def get_ws(sheet_name):
-    """Retourne une feuille et signale clairement si son nom est incorrect."""
-    spreadsheet = get_spreadsheet()
-
-    try:
-        return spreadsheet.worksheet(sheet_name)
-    except gspread.exceptions.WorksheetNotFound:
-        available = [ws.title for ws in spreadsheet.worksheets()]
+    """Retourne une feuille sans refaire la lecture des métadonnées à chaque appel."""
+    worksheets = get_worksheets()
+    if sheet_name not in worksheets:
+        available = sorted(worksheets.keys())
         st.error(
-            f"❌ La feuille '{sheet_name}' n'existe pas dans le fichier Google Sheets.\n\n"
+            f"❌ La feuille '{sheet_name}' n'existe pas dans le Google Sheet.\n\n"
             f"Feuilles disponibles : {', '.join(available)}"
         )
-        raise
-    except gspread.exceptions.APIError as e:
-        st.error(
-            f"❌ Google Sheets a refusé l'accès à la feuille '{sheet_name}'.\n\n"
-            f"Détail Google API : {e}\n\n"
-            "Vérifiez le partage du fichier avec le compte de service."
+        raise gspread.exceptions.WorksheetNotFound(
+            f"Worksheet '{sheet_name}' not found"
         )
-        raise
+    return worksheets[sheet_name]
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=600, show_spinner=False)
 def load_sheet(sheet_name):
-    """Charge une feuille Google Sheets."""
-    ws = get_ws(sheet_name)
-    data = ws.get_all_records()
-    df = pd.DataFrame(data)
+    """Charge une feuille pendant 10 minutes pour limiter les lectures Google Sheets."""
+    try:
+        ws = get_ws(sheet_name)
+        data = ws.get_all_records()
+        df = pd.DataFrame(data)
+        if not df.empty:
+            df.columns = df.columns.astype(str).str.strip()
+        return df
+    except gspread.exceptions.APIError as e:
+        if "429" in str(e):
+            st.error(
+                f"❌ Quota Google Sheets dépassé pendant la lecture de '{sheet_name}'.\n\n"
+                "Attendez quelques minutes avant de refaire un test.\n\n"
+                f"Détail : {e}"
+            )
+        else:
+            st.error(
+                f"❌ Erreur Google Sheets lors de la lecture de '{sheet_name}'.\n\n"
+                f"Détail : {e}"
+            )
+        raise
 
-    if not df.empty:
-        df.columns = (
-            df.columns.astype(str)
-            .str.strip()
-        )
 
-    return df
+def _invalidate_sheet_cache():
+    try:
+        load_sheet.clear()
+    except Exception:
+        pass
 
 
 def append_row(sheet_name, row):
-    """Ajoute une ligne dans une feuille Google Sheets."""
+    """Ajoute une ligne dans Google Sheets."""
     try:
         ws = get_ws(sheet_name)
-        ws.append_row(
-            row,
-            value_input_option="USER_ENTERED"
-        )
-        load_sheet.clear()
+        ws.append_row(row, value_input_option="USER_ENTERED")
+        _invalidate_sheet_cache()
     except gspread.exceptions.APIError as e:
-        st.error(
-            f"❌ Erreur Google Sheets lors de l'enregistrement dans '{sheet_name}'.\n\n"
-            f"Détail : {e}\n\n"
-            "Si l'erreur est [403], partagez le Google Sheet avec le compte de service en Éditeur. "
-            "Si l'erreur est [404], vérifiez le SPREADSHEET_ID et le nom de la feuille."
-        )
+        if "429" in str(e):
+            st.error(
+                f"❌ Quota Google Sheets dépassé pendant l'enregistrement dans '{sheet_name}'.\n\n"
+                "Attendez quelques minutes puis réessayez.\n\n"
+                f"Détail : {e}"
+            )
+        else:
+            st.error(
+                f"❌ Erreur Google Sheets lors de l'enregistrement dans '{sheet_name}'.\n\n"
+                f"Détail : {e}"
+            )
         raise
 
 
 def append_dict_row(sheet_name, data):
-    """
-    Ajoute une ligne à partir d'un dictionnaire
-    en respectant l'ordre des colonnes existantes.
-    """
-    ws = get_ws(sheet_name)
-
-    headers = [
-        str(x).strip()
-        for x in ws.row_values(1)
-    ]
-
-    row = [
-        data.get(header, "")
-        for header in headers
-    ]
-
-    ws.append_row(
-        row,
-        value_input_option="USER_ENTERED"
-    )
-
-    load_sheet.clear()
+    """Ajoute une ligne selon l'ordre des colonnes existantes."""
+    try:
+        ws = get_ws(sheet_name)
+        headers = [str(x).strip() for x in ws.row_values(1)]
+        row = [data.get(header, "") for header in headers]
+        ws.append_row(row, value_input_option="USER_ENTERED")
+        _invalidate_sheet_cache()
+    except gspread.exceptions.APIError as e:
+        if "429" in str(e):
+            st.error(
+                f"❌ Quota Google Sheets dépassé pendant l'enregistrement dans '{sheet_name}'.\n\n"
+                "Attendez quelques minutes puis réessayez.\n\n"
+                f"Détail : {e}"
+            )
+        else:
+            st.error(
+                f"❌ Erreur Google Sheets lors de l'enregistrement dans '{sheet_name}'.\n\n"
+                f"Détail : {e}"
+            )
+        raise
 
 
 def clean_text(value):
@@ -546,21 +551,22 @@ if not st.session_state.logged_in:
 
 
 # =========================================================
-# LOAD MAIN DATA
+# MAIN DATA
 # =========================================================
-df_users = load_sheet(SHEET_USERS)
-df_pos = load_sheet(SHEET_POS)
-df_products = load_sheet(SHEET_PRODUCTS)
-df_profile = load_sheet(SHEET_PROFILE)
-df_distribution = load_sheet(SHEET_DISTRIBUTION)
-df_prices = load_sheet(SHEET_PRICES)
-df_surveys = load_sheet(SHEET_SURVEYS)
-df_subjects = load_sheet(SHEET_SURVEY_SUBJECTS)
-df_visits = load_sheet(SHEET_VISITS)
-df_objectives = load_sheet(SHEET_OBJECTIVES)
-df_material_types = load_sheet(SHEET_MATERIAL_TYPES)
-df_material_pos = load_sheet(SHEET_MATERIAL_POS)
-df_material_control = load_sheet(SHEET_MATERIAL_CONTROL)
+# Les tables sont initialisées vides puis chargées uniquement selon le menu.
+df_users = pd.DataFrame()
+df_pos = pd.DataFrame()
+df_products = pd.DataFrame()
+df_profile = pd.DataFrame()
+df_distribution = pd.DataFrame()
+df_prices = pd.DataFrame()
+df_surveys = pd.DataFrame()
+df_subjects = pd.DataFrame()
+df_visits = pd.DataFrame()
+df_objectives = pd.DataFrame()
+df_material_types = pd.DataFrame()
+df_material_pos = pd.DataFrame()
+df_material_control = pd.DataFrame()
 
 
 # =========================================================
@@ -596,6 +602,64 @@ if st.sidebar.button(
     use_container_width=True
 ):
     logout()
+
+
+# =========================================================
+# CHARGEMENT A LA DEMANDE
+# =========================================================
+# Une table est lue uniquement lorsqu'elle est nécessaire au module ouvert.
+# Cela réduit fortement les appels Google Sheets et évite les erreurs 429.
+if menu == "🏠 Dashboard":
+    df_pos = load_sheet(SHEET_POS)
+    df_products = load_sheet(SHEET_PRODUCTS)
+    df_prices = load_sheet(SHEET_PRICES)
+    df_surveys = load_sheet(SHEET_SURVEYS)
+
+elif menu == "📦 Distribution Numérique":
+    df_pos = load_sheet(SHEET_POS)
+    df_products = load_sheet(SHEET_PRODUCTS)
+    df_distribution = load_sheet(SHEET_DISTRIBUTION)
+
+elif menu == "👤 Profil Client":
+    df_pos = load_sheet(SHEET_POS)
+    df_profile = load_sheet(SHEET_PROFILE)
+
+elif menu == "💰 Relevé Prix":
+    df_pos = load_sheet(SHEET_POS)
+    df_products = load_sheet(SHEET_PRODUCTS)
+    df_prices = load_sheet(SHEET_PRICES)
+
+elif menu == "📝 Enquête":
+    df_pos = load_sheet(SHEET_POS)
+    df_products = load_sheet(SHEET_PRODUCTS)
+    df_surveys = load_sheet(SHEET_SURVEYS)
+    df_subjects = load_sheet(SHEET_SURVEY_SUBJECTS)
+
+elif menu == "🧰 Matériel POS":
+    df_pos = load_sheet(SHEET_POS)
+    df_products = load_sheet(SHEET_PRODUCTS)
+    df_material_types = load_sheet(SHEET_MATERIAL_TYPES)
+    df_material_pos = load_sheet(SHEET_MATERIAL_POS)
+    df_material_control = load_sheet(SHEET_MATERIAL_CONTROL)
+    df_distribution = load_sheet(SHEET_DISTRIBUTION)
+
+elif menu == "🚗 Visites POS":
+    df_pos = load_sheet(SHEET_POS)
+    df_visits = load_sheet(SHEET_VISITS)
+
+elif menu == "🎯 Objectifs POS":
+    df_pos = load_sheet(SHEET_POS)
+    df_objectives = load_sheet(SHEET_OBJECTIVES)
+
+elif menu == "📈 Statistiques":
+    df_pos = load_sheet(SHEET_POS)
+    df_products = load_sheet(SHEET_PRODUCTS)
+    df_distribution = load_sheet(SHEET_DISTRIBUTION)
+    df_prices = load_sheet(SHEET_PRICES)
+    df_surveys = load_sheet(SHEET_SURVEYS)
+    df_profile = load_sheet(SHEET_PROFILE)
+    df_material_pos = load_sheet(SHEET_MATERIAL_POS)
+    df_material_control = load_sheet(SHEET_MATERIAL_CONTROL)
 
 
 # =========================================================
