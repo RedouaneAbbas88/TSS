@@ -2380,6 +2380,14 @@ elif menu == "🧰 Matériel POS":
         SHEET_MATERIAL_CONTROL
     )
 
+    # Correction : la partie Contrôle du matériel utilise aussi
+    # les données de Distribution pour vérifier la conformité de la
+    # marque du matériel avec les produits présents dans le POS.
+    # Il faut donc charger df_distribution dans ce module également.
+    df_distribution = load_sheet(
+        SHEET_DISTRIBUTION
+    )
+
     st.info(
         "Suivi des tinda, logos, présentoirs, racks, "
         "vitrines, posters, affichage et autres matériels."
