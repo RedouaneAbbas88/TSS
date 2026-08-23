@@ -2,19 +2,12 @@ import streamlit as st
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
-from googleapiclient.errors import HttpError
-import io
 import uuid
-import time
 from datetime import datetime
-
 
 # =========================================================
 # CONFIGURATION
 # =========================================================
-
 st.set_page_config(
     page_title="Data_Info",
     page_icon="📊",
@@ -41,17 +34,15 @@ div[data-testid="stMetric"] {
 </style>
 """, unsafe_allow_html=True)
 
-
 # =========================================================
 # GOOGLE SHEETS
 # =========================================================
-
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
 ]
 
-SPREADSHEET_ID = "1SN02jxpV2oyc3tWItY9c2Kc_UEXfqTdtQSL9WgGAi3w"
+SPREADSHEET_ID = "PUT_YOUR_GOOGLE_SHEET_ID_HERE"
 
 SHEET_USERS = "Utilisateurs"
 SHEET_POS = "POS"
@@ -64,648 +55,85 @@ SHEET_SURVEY_SUBJECTS = "Enquetes_Sujets"
 SHEET_VISITS = "Visites_POS"
 SHEET_OBJECTIVES = "Objectifs_POS"
 
-SHEET_MATERIAL_TYPES = "Types_Materiel"
-SHEET_MATERIAL_POS = "Materiel_POS"
-SHEET_MATERIAL_CONTROL = "Controle_Materiel"
-DRIVE_MATERIAL_FOLDER = "Data_Info_Materiel"
-
-
-# =========================================================
-# CONNEXION GOOGLE
-# =========================================================
 
 @st.cache_resource
 def get_client():
-
     creds = Credentials.from_service_account_info(
         st.secrets["google"],
         scopes=SCOPES
     )
-
     return gspread.authorize(creds)
 
 
 client = get_client()
 
 
-@st.cache_resource
-def get_spreadsheet():
-
-    return client.open_by_key(SPREADSHEET_ID)
-
-
 def get_ws(sheet_name):
-
-    try:
-
-        spreadsheet = get_spreadsheet()
-
-        return spreadsheet.worksheet(sheet_name)
-
-    except gspread.WorksheetNotFound:
-
-        st.error(
-            f"❌ La feuille Google Sheets '{sheet_name}' "
-            f"n'existe pas."
-        )
-
-        st.stop()
-
-    except gspread.exceptions.APIError as e:
-
-        error_text = str(e)
-
-        if "429" in error_text:
-
-            st.error(
-                "❌ Google Sheets a atteint la limite de lectures.\n\n"
-                "Erreur : 429 - Quota exceeded.\n\n"
-                "Attendez quelques minutes puis rechargez "
-                "l'application."
-            )
-
-        elif "403" in error_text:
-
-            st.error(
-                "❌ Accès refusé au Google Sheet.\n\n"
-                "Vérifiez que le compte de service utilisé "
-                "dans st.secrets['google'] a accès au fichier."
-            )
-
-        elif "404" in error_text:
-
-            st.error(
-                "❌ Google Sheet introuvable.\n\n"
-                "Vérifiez le SPREADSHEET_ID."
-            )
-
-        else:
-
-            st.error(
-                f"❌ Erreur Google Sheets : {error_text}"
-            )
-
-        st.stop()
+    return client.open_by_key(SPREADSHEET_ID).worksheet(sheet_name)
 
 
-# =========================================================
-# GOOGLE DRIVE - PHOTOS DU MATERIEL
-# =========================================================
-
-@st.cache_resource
-def get_drive_service():
-    creds = Credentials.from_service_account_info(
-        st.secrets["google"],
-        scopes=SCOPES
-    )
-    return build(
-        "drive",
-        "v3",
-        credentials=creds,
-        cache_discovery=False
-    )
-
-
-def get_or_create_drive_folder():
-    """Retourne l'ID du dossier Google Drive utilisé pour les photos."""
-    service = get_drive_service()
-
-    response = service.files().list(
-        q=(
-            f"name = '{DRIVE_MATERIAL_FOLDER}' "
-            "and mimeType = 'application/vnd.google-apps.folder' "
-            "and trashed = false"
-        ),
-        spaces="drive",
-        fields="files(id,name)",
-        pageSize=1
-    ).execute()
-
-    files = response.get("files", [])
-    if files:
-        return files[0]["id"]
-
-    metadata = {
-        "name": DRIVE_MATERIAL_FOLDER,
-        "mimeType": "application/vnd.google-apps.folder"
-    }
-
-    folder = service.files().create(
-        body=metadata,
-        fields="id"
-    ).execute()
-
-    return folder["id"]
-
-
-def upload_photo_to_drive(uploaded_file, prefix="materiel"):
-    """Upload une photo dans Google Drive et retourne son lien."""
-    if uploaded_file is None:
-        return ""
-
-    try:
-        service = get_drive_service()
-        folder_id = get_or_create_drive_folder()
-
-        extension = "jpg"
-        original_name = clean_text(uploaded_file.name)
-        if "." in original_name:
-            extension = original_name.rsplit(".", 1)[-1].lower()
-            if extension not in ["jpg", "jpeg", "png"]:
-                extension = "jpg"
-
-        filename = (
-            f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_"
-            f"{uuid.uuid4().hex[:8]}.{extension}"
-        )
-
-        file_bytes = uploaded_file.getvalue()
-        media = MediaIoBaseUpload(
-            io.BytesIO(file_bytes),
-            mimetype=uploaded_file.type or "image/jpeg",
-            resumable=False
-        )
-
-        metadata = {
-            "name": filename,
-            "parents": [folder_id]
-        }
-
-        created = service.files().create(
-            body=metadata,
-            media_body=media,
-            fields="id,name,webViewLink"
-        ).execute()
-
-        file_id = created["id"]
-
-        # Rend le fichier accessible par lien.
-        # Si la politique Google Workspace interdit le partage public,
-        # on conserve quand même le lien Drive normal.
-        try:
-            service.permissions().create(
-                fileId=file_id,
-                body={"type": "anyone", "role": "reader"},
-                fields="id"
-            ).execute()
-        except HttpError:
-            pass
-
-        return created.get(
-            "webViewLink",
-            f"https://drive.google.com/file/d/{file_id}/view"
-        )
-
-    except Exception as e:
-        st.error(
-            "❌ Impossible d'envoyer la photo vers Google Drive : "
-            f"{e}"
-        )
-        return ""
-
-
-# =========================================================
-# CHARGEMENT DES DONNEES
-# =========================================================
-
-@st.cache_data(
-    ttl=600,
-    show_spinner=False
-)
+@st.cache_data(ttl=30)
 def load_sheet(sheet_name):
-
     try:
-
         ws = get_ws(sheet_name)
-
         data = ws.get_all_records()
-
         df = pd.DataFrame(data)
-
         if not df.empty:
-
-            df.columns = (
-                df.columns
-                .astype(str)
-                .str.strip()
-            )
-
+            df.columns = df.columns.astype(str).str.strip()
         return df
-
-    except gspread.exceptions.APIError as e:
-
-        error_text = str(e)
-
-        if "429" in error_text:
-
-            st.error(
-                "❌ Quota Google Sheets dépassé.\n\n"
-                "La limite de lectures par minute a été atteinte.\n\n"
-                "Attendez quelques minutes avant de relancer."
-            )
-
-        else:
-
-            st.error(
-                f"❌ Erreur Google Sheets : {error_text}"
-            )
-
-        return pd.DataFrame()
-
     except Exception as e:
-
-        st.error(
-            f"❌ Impossible de charger la feuille "
-            f"'{sheet_name}'.\n\n"
-            f"Détail : {e}"
-        )
-
         return pd.DataFrame()
 
-
-def clear_sheet_cache(sheet_name=None):
-
-    try:
-
-        if sheet_name:
-            load_sheet.clear(sheet_name)
-
-        else:
-            load_sheet.clear()
-
-    except Exception:
-
-        try:
-            load_sheet.clear()
-        except Exception:
-            pass
-
-
-# =========================================================
-# ECRITURE GOOGLE SHEETS
-# =========================================================
 
 def append_row(sheet_name, row):
+    ws = get_ws(sheet_name)
+    ws.append_row(row, value_input_option="USER_ENTERED")
+    load_sheet.clear()
 
-    max_attempts = 3
-
-    for attempt in range(max_attempts):
-
-        try:
-
-            ws = get_ws(sheet_name)
-
-            ws.append_row(
-                row,
-                value_input_option="USER_ENTERED"
-            )
-
-            clear_sheet_cache(sheet_name)
-
-            return True
-
-        except gspread.exceptions.APIError as e:
-
-            error_text = str(e)
-
-            if "429" in error_text:
-
-                if attempt < max_attempts - 1:
-
-                    time.sleep(
-                        2 * (attempt + 1)
-                    )
-
-                    continue
-
-                st.error(
-                    "❌ Google Sheets refuse actuellement "
-                    "l'écriture à cause de la limite de quota "
-                    "429.\n\n"
-                    "Attendez quelques minutes puis réessayez."
-                )
-
-                return False
-
-            st.error(
-                f"❌ Erreur Google Sheets : {error_text}"
-            )
-
-            return False
-
-        except Exception as e:
-
-            st.error(
-                f"❌ Erreur lors de l'enregistrement : {e}"
-            )
-
-            return False
-
-    return False
-
-
-def append_dict_row(sheet_name, values):
-
-    try:
-
-        ws = get_ws(sheet_name)
-
-        headers = [
-            str(x).strip()
-            for x in ws.row_values(1)
-        ]
-
-        row = [
-            values.get(header, "")
-            for header in headers
-        ]
-
-        return append_row(
-            sheet_name,
-            row
-        )
-
-    except Exception as e:
-
-        st.error(
-            f"❌ Impossible de préparer "
-            f"l'enregistrement : {e}"
-        )
-
-        return False
-
-
-# =========================================================
-# OUTILS
-# =========================================================
 
 def clean_text(value):
-
     if pd.isna(value):
         return ""
-
     return str(value).strip()
 
 
 def unique_sorted(df, column):
-
-    if df is None:
+    if df.empty or column not in df.columns:
         return []
-
-    if df.empty:
-        return []
-
-    if column not in df.columns:
-        return []
-
     values = (
         df[column]
         .dropna()
         .astype(str)
         .str.strip()
     )
-
-    values = [
-        x
-        for x in values.unique().tolist()
-        if x
-    ]
-
+    values = [v for v in values.unique().tolist() if v]
     return sorted(values)
 
 
-def filter_products(
-    products,
-    marque="",
-    categorie="",
-    famille="",
-    produit=""
-):
-
-    if products is None:
-        return pd.DataFrame()
-
+def filter_products(products, marque="", categorie="", famille="", produit=""):
     if products.empty:
         return products
 
     result = products.copy()
 
     if marque and "Marque" in result.columns:
-
-        result = result[
-            result["Marque"]
-            .astype(str)
-            .str.strip()
-            == marque.strip()
-        ]
+        result = result[result["Marque"].astype(str).str.strip() == marque]
 
     if categorie and "Catégorie" in result.columns:
-
-        result = result[
-            result["Catégorie"]
-            .astype(str)
-            .str.strip()
-            == categorie.strip()
-        ]
+        result = result[result["Catégorie"].astype(str).str.strip() == categorie]
 
     if famille and "Famille" in result.columns:
-
-        result = result[
-            result["Famille"]
-            .astype(str)
-            .str.strip()
-            == famille.strip()
-        ]
+        result = result[result["Famille"].astype(str).str.strip() == famille]
 
     if produit and "Produit" in result.columns:
-
-        result = result[
-            result["Produit"]
-            .astype(str)
-            .str.strip()
-            == produit.strip()
-        ]
+        result = result[result["Produit"].astype(str).str.strip() == produit]
 
     return result
 
 
 # =========================================================
-# CASCADE PRODUITS
+# SESSION / LOGIN
 # =========================================================
-
-def product_cascade(
-    df_products,
-    prefix="product"
-):
-
-    if df_products.empty:
-
-        st.warning(
-            "La table Produits est vide."
-        )
-
-        return (
-            "--- Sélectionner ---",
-            "--- Sélectionner ---",
-            "--- Sélectionner ---",
-            "--- Sélectionner ---",
-            "--- Sélectionner ---"
-        )
-
-    # -----------------------------------------------------
-    # MARQUE
-    # -----------------------------------------------------
-
-    marque_values = unique_sorted(
-        df_products,
-        "Marque"
-    )
-
-    marque = st.selectbox(
-        "Marque",
-        ["--- Sélectionner ---"] + marque_values,
-        key=f"{prefix}_marque"
-    )
-
-    # -----------------------------------------------------
-    # CATEGORIE
-    # -----------------------------------------------------
-
-    temp = filter_products(
-        df_products,
-        marque=(
-            ""
-            if marque == "--- Sélectionner ---"
-            else marque
-        )
-    )
-
-    categorie_values = unique_sorted(
-        temp,
-        "Catégorie"
-    )
-
-    categorie = st.selectbox(
-        "Catégorie",
-        ["--- Sélectionner ---"] + categorie_values,
-        key=f"{prefix}_categorie"
-    )
-
-    # -----------------------------------------------------
-    # FAMILLE
-    # -----------------------------------------------------
-
-    temp = filter_products(
-        df_products,
-        marque=(
-            ""
-            if marque == "--- Sélectionner ---"
-            else marque
-        ),
-        categorie=(
-            ""
-            if categorie == "--- Sélectionner ---"
-            else categorie
-        )
-    )
-
-    famille_values = unique_sorted(
-        temp,
-        "Famille"
-    )
-
-    famille = st.selectbox(
-        "Famille",
-        ["--- Sélectionner ---"] + famille_values,
-        key=f"{prefix}_famille"
-    )
-
-    # -----------------------------------------------------
-    # PRODUIT
-    # -----------------------------------------------------
-
-    temp = filter_products(
-        df_products,
-        marque=(
-            ""
-            if marque == "--- Sélectionner ---"
-            else marque
-        ),
-        categorie=(
-            ""
-            if categorie == "--- Sélectionner ---"
-            else categorie
-        ),
-        famille=(
-            ""
-            if famille == "--- Sélectionner ---"
-            else famille
-        )
-    )
-
-    product_values = unique_sorted(
-        temp,
-        "Produit"
-    )
-
-    produit = st.selectbox(
-        "Produit",
-        ["--- Sélectionner ---"] + product_values,
-        key=f"{prefix}_produit"
-    )
-
-    # -----------------------------------------------------
-    # CAPACITE / DIMENSION
-    # -----------------------------------------------------
-
-    temp = filter_products(
-        df_products,
-        marque=(
-            ""
-            if marque == "--- Sélectionner ---"
-            else marque
-        ),
-        categorie=(
-            ""
-            if categorie == "--- Sélectionner ---"
-            else categorie
-        ),
-        famille=(
-            ""
-            if famille == "--- Sélectionner ---"
-            else famille
-        ),
-        produit=(
-            ""
-            if produit == "--- Sélectionner ---"
-            else produit
-        )
-    )
-
-    dimension_values = unique_sorted(
-        temp,
-        "Capacité_Dimension"
-    )
-
-    capacite = st.selectbox(
-        "Capacité / Dimension",
-        ["--- Sélectionner ---"] + dimension_values,
-        key=f"{prefix}_capacite"
-    )
-
-    return (
-        marque,
-        categorie,
-        famille,
-        produit,
-        capacite
-    )
-
-
-# =========================================================
-# SESSION
-# =========================================================
-
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 
@@ -720,84 +148,55 @@ if "user_id" not in st.session_state:
 
 
 def logout():
-
     st.session_state.logged_in = False
     st.session_state.role = ""
     st.session_state.user_name = ""
     st.session_state.user_id = ""
-
     st.rerun()
 
 
 # =========================================================
-# LOGIN
+# LOGIN PAGE
 # =========================================================
-
 if not st.session_state.logged_in:
 
     st.markdown(
         "<div class='main-title'>📊 Data_Info</div>",
         unsafe_allow_html=True
     )
-
     st.markdown(
-        "<div class='small-title'>"
-        "Market Data Collection & Analysis"
-        "</div>",
+        "<div class='small-title'>Market Data Collection & Analysis</div>",
         unsafe_allow_html=True
     )
 
-    users = load_sheet(
-        SHEET_USERS
-    )
+    users = load_sheet(SHEET_USERS)
 
     if users.empty:
-
         st.error(
-            "Impossible de charger la table Utilisateurs."
+            "Impossible de charger la table Utilisateurs. "
+            "Vérifiez le nom de la feuille et la connexion Google Sheets."
         )
-
         st.stop()
 
-    if (
-        "Nom" not in users.columns
-        or "Password" not in users.columns
-    ):
-
+    if "Nom" not in users.columns or "Password" not in users.columns:
         st.error(
-            "La table Utilisateurs doit contenir : "
+            "La table Utilisateurs doit contenir au minimum : "
             "ID_User, Nom, Email, Password, Role, Statut."
         )
-
         st.stop()
 
-    users["Nom"] = (
-        users["Nom"]
-        .astype(str)
-        .str.strip()
-    )
+    users["Nom"] = users["Nom"].astype(str).str.strip()
 
     active_users = users.copy()
 
     if "Statut" in active_users.columns:
-
         active_users = active_users[
-            active_users["Statut"]
-            .astype(str)
-            .str.lower()
-            .str.strip()
-            != "inactif"
+            active_users["Statut"].astype(str).str.lower().str.strip() != "inactif"
         ]
 
-    names = sorted(
-        active_users["Nom"]
-        .dropna()
-        .unique()
-        .tolist()
-    )
+    names = sorted(active_users["Nom"].dropna().unique().tolist())
 
     with st.form("login_form"):
-
         st.subheader("🔐 Connexion")
 
         selected_name = st.selectbox(
@@ -816,59 +215,26 @@ if not st.session_state.logged_in:
         )
 
         if login_button:
-
             user = active_users[
-                active_users["Nom"]
-                == selected_name
+                active_users["Nom"] == selected_name
             ]
 
             if user.empty:
-
-                st.error(
-                    "Utilisateur introuvable."
-                )
-
+                st.error("Utilisateur introuvable.")
             else:
-
                 user = user.iloc[0]
 
-                if (
-                    clean_text(
-                        user["Password"]
-                    )
-                    != password.strip()
-                ):
-
-                    st.error(
-                        "Mot de passe incorrect."
-                    )
-
+                if clean_text(user["Password"]) != password.strip():
+                    st.error("Mot de passe incorrect.")
                 else:
-
                     st.session_state.logged_in = True
+                    st.session_state.user_name = clean_text(user["Nom"])
+                    st.session_state.role = clean_text(
+                        user.get("Role", "enqueteur")
+                    ).lower()
 
-                    st.session_state.user_name = (
-                        clean_text(
-                            user["Nom"]
-                        )
-                    )
-
-                    st.session_state.role = (
-                        clean_text(
-                            user.get(
-                                "Role",
-                                "enqueteur"
-                            )
-                        ).lower()
-                    )
-
-                    st.session_state.user_id = (
-                        clean_text(
-                            user.get(
-                                "ID_User",
-                                ""
-                            )
-                        )
+                    st.session_state.user_id = clean_text(
+                        user.get("ID_User", "")
                     )
 
                     st.rerun()
@@ -877,20 +243,26 @@ if not st.session_state.logged_in:
 
 
 # =========================================================
+# LOAD MAIN DATA
+# =========================================================
+df_users = load_sheet(SHEET_USERS)
+df_pos = load_sheet(SHEET_POS)
+df_products = load_sheet(SHEET_PRODUCTS)
+df_profile = load_sheet(SHEET_PROFILE)
+df_distribution = load_sheet(SHEET_DISTRIBUTION)
+df_prices = load_sheet(SHEET_PRICES)
+df_surveys = load_sheet(SHEET_SURVEYS)
+df_subjects = load_sheet(SHEET_SURVEY_SUBJECTS)
+df_visits = load_sheet(SHEET_VISITS)
+df_objectives = load_sheet(SHEET_OBJECTIVES)
+
+
+# =========================================================
 # SIDEBAR
 # =========================================================
-
-st.sidebar.markdown(
-    "## 📊 Data_Info"
-)
-
-st.sidebar.write(
-    f"👤 **{st.session_state.user_name}**"
-)
-
-st.sidebar.write(
-    f"🔑 Role : **{st.session_state.role}**"
-)
+st.sidebar.markdown("## 📊 Data_Info")
+st.sidebar.write(f"👤 **{st.session_state.user_name}**")
+st.sidebar.write(f"🔑 Role : **{st.session_state.role}**")
 
 st.sidebar.markdown("---")
 
@@ -902,62 +274,33 @@ menu = st.sidebar.radio(
         "👤 Profil Client",
         "💰 Relevé Prix",
         "📝 Enquête",
-        "🧰 Matériel POS",
-        "🚗 Visites POS",
-        "🎯 Objectifs POS",
         "📈 Statistiques"
     ]
 )
 
-if st.sidebar.button(
-    "🚪 Déconnexion",
-    use_container_width=True
-):
-
+if st.sidebar.button("🚪 Déconnexion", use_container_width=True):
     logout()
 
 
 # =========================================================
 # HEADER
 # =========================================================
-
 st.markdown(
-    "<div class='main-title'>📊 Data_Info</div>",
+    f"<div class='main-title'>📊 Data_Info</div>",
     unsafe_allow_html=True
 )
 
 st.caption(
-    f"Utilisateur connecté : "
-    f"{st.session_state.user_name}"
+    f"Utilisateur connecté : {st.session_state.user_name}"
 )
 
 
 # =========================================================
 # DASHBOARD
 # =========================================================
-
 if menu == "🏠 Dashboard":
 
-    st.header(
-        "🏠 Tableau de bord"
-    )
-
-    # Seulement les tables utiles
-    df_pos = load_sheet(
-        SHEET_POS
-    )
-
-    df_products = load_sheet(
-        SHEET_PRODUCTS
-    )
-
-    df_prices = load_sheet(
-        SHEET_PRICES
-    )
-
-    df_surveys = load_sheet(
-        SHEET_SURVEYS
-    )
+    st.header("🏠 Tableau de bord")
 
     c1, c2, c3, c4 = st.columns(4)
 
@@ -983,1242 +326,497 @@ if menu == "🏠 Dashboard":
 
     st.markdown("---")
 
-    st.subheader(
-        "📌 Modules Data_Info"
-    )
+    st.subheader("📌 Modules Data_Info")
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
-
         st.info(
             "**Distribution Numérique**\n\n"
-            "Mesurer la présence des produits "
-            "et des marques dans les POS."
+            "Mesurer la présence des produits et des marques dans les POS."
         )
 
     with col2:
-
         st.info(
             "**Profil Client**\n\n"
-            "Collecter les informations "
-            "principales de chaque point de vente."
+            "Collecter les informations principales de chaque point de vente."
         )
 
     with col3:
-
         st.info(
             "**Relevé Prix**\n\n"
-            "Collecter et comparer "
-            "les prix du marché."
+            "Collecter et comparer les prix du marché."
         )
 
     col4, col5 = st.columns(2)
 
     with col4:
-
         st.info(
             "**Enquête**\n\n"
-            "Créer des enquêtes "
-            "spécifiques sur le marché."
+            "Créer des enquêtes spécifiques sur le marché."
         )
 
     with col5:
-
         st.info(
             "**Statistiques**\n\n"
-            "Suivre les KPI et l'évolution "
-            "des données collectées."
+            "Suivre les KPI et l'évolution des données collectées."
         )
 
 
 # =========================================================
 # DISTRIBUTION NUMERIQUE
 # =========================================================
-
 elif menu == "📦 Distribution Numérique":
 
-    st.header(
-        "📦 Distribution Numérique"
-    )
-
-    df_pos = load_sheet(
-        SHEET_POS
-    )
-
-    df_products = load_sheet(
-        SHEET_PRODUCTS
-    )
-
-    df_distribution = load_sheet(
-        SHEET_DISTRIBUTION
-    )
+    st.header("📦 Distribution Numérique")
 
     if df_pos.empty:
-
-        st.warning(
-            "La table POS est vide."
-        )
-
+        st.warning("La table POS est vide.")
         st.stop()
 
     if df_products.empty:
-
-        st.warning(
-            "La table Produits est vide."
-        )
-
+        st.warning("La table Produits est vide.")
         st.stop()
 
-    # -----------------------------------------------------
-    # POS
-    # -----------------------------------------------------
+    with st.form("distribution_form"):
 
-    pos_names = unique_sorted(
-        df_pos,
-        "ID_POS"
-    )
+        st.subheader("📍 Point de vente")
 
-    selected_pos = st.selectbox(
-        "📍 Point de vente",
-        ["--- Sélectionner ---"]
-        + pos_names,
-        key="distribution_pos"
-    )
+        pos_names = []
 
-    st.subheader(
-        "📦 Produit"
-    )
+        if "ID_POS" in df_pos.columns:
+            pos_names = unique_sorted(df_pos, "ID_POS")
 
-    (
-        marque,
-        categorie,
-        famille,
-        produit,
-        capacite
-    ) = product_cascade(
-        df_products,
-        prefix="distribution"
-    )
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-
-        quantite = st.number_input(
-            "Quantité présente",
-            min_value=0,
-            step=1,
-            value=0,
-            key="distribution_quantite"
+        selected_pos = st.selectbox(
+            "POS",
+            ["--- Sélectionner ---"] + pos_names
         )
 
-    with col2:
+        st.subheader("📦 Produit")
 
-        date_visite = st.date_input(
-            "Date de visite",
-            value=datetime.now().date(),
-            key="distribution_date"
+        marque_values = unique_sorted(df_products, "Marque")
+
+        marque = st.selectbox(
+            "Marque",
+            ["--- Sélectionner ---"] + marque_values
         )
 
-    remarque = st.text_area(
-        "Remarque",
-        key="distribution_remarque"
-    )
+        temp = filter_products(
+            df_products,
+            marque="" if marque.startswith("---") else marque
+        )
 
-    if st.button(
-        "💾 Enregistrer",
-        use_container_width=True,
-        key="save_distribution"
-    ):
+        categorie_values = unique_sorted(temp, "Catégorie")
 
-        errors = []
+        categorie = st.selectbox(
+            "Catégorie",
+            ["--- Sélectionner ---"] + categorie_values
+        )
 
-        if selected_pos == "--- Sélectionner ---":
-            errors.append(
-                "Sélectionnez un POS."
+        temp = filter_products(
+            df_products,
+            marque="" if marque.startswith("---") else marque,
+            categorie="" if categorie.startswith("---") else categorie
+        )
+
+        famille_values = unique_sorted(temp, "Famille")
+
+        famille = st.selectbox(
+            "Famille",
+            ["--- Sélectionner ---"] + famille_values
+        )
+
+        temp = filter_products(
+            df_products,
+            marque="" if marque.startswith("---") else marque,
+            categorie="" if categorie.startswith("---") else categorie,
+            famille="" if famille.startswith("---") else famille
+        )
+
+        product_values = unique_sorted(temp, "Produit")
+
+        produit = st.selectbox(
+            "Produit",
+            ["--- Sélectionner ---"] + product_values
+        )
+
+        temp = filter_products(
+            df_products,
+            marque="" if marque.startswith("---") else marque,
+            categorie="" if categorie.startswith("---") else categorie,
+            famille="" if famille.startswith("---") else famille,
+            produit="" if produit.startswith("---") else produit
+        )
+
+        dimension_values = unique_sorted(
+            temp,
+            "Capacité_Dimension"
+        )
+
+        capacite = st.selectbox(
+            "Capacité / Dimension",
+            ["--- Sélectionner ---"] + dimension_values
+        )
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            quantite = st.number_input(
+                "Quantité présente",
+                min_value=0,
+                step=1,
+                value=0
             )
 
-        if marque == "--- Sélectionner ---":
-            errors.append(
-                "Sélectionnez une marque."
+        with col2:
+            date_visite = st.date_input(
+                "Date de visite",
+                value=datetime.now().date()
             )
 
-        if categorie == "--- Sélectionner ---":
-            errors.append(
-                "Sélectionnez une catégorie."
-            )
+        remarque = st.text_area("Remarque")
 
-        if famille == "--- Sélectionner ---":
-            errors.append(
-                "Sélectionnez une famille."
-            )
+        save = st.form_submit_button(
+            "💾 Enregistrer",
+            use_container_width=True
+        )
 
-        if produit == "--- Sélectionner ---":
-            errors.append(
-                "Sélectionnez un produit."
-            )
+        if save:
 
-        if capacite == "--- Sélectionner ---":
-            errors.append(
-                "Sélectionnez une capacité/dimension."
-            )
+            errors = []
 
-        if errors:
+            if selected_pos == "--- Sélectionner ---":
+                errors.append("Sélectionnez un POS.")
 
-            for error in errors:
-                st.error(error)
+            if marque == "--- Sélectionner ---":
+                errors.append("Sélectionnez une marque.")
 
-        else:
+            if categorie == "--- Sélectionner ---":
+                errors.append("Sélectionnez une catégorie.")
 
-            success = append_row(
-                SHEET_DISTRIBUTION,
-                [
-                    str(uuid.uuid4()),
-                    str(date_visite),
-                    selected_pos,
-                    marque,
-                    categorie,
-                    famille,
-                    produit,
-                    capacite,
-                    int(quantite),
-                    st.session_state.user_id,
-                    remarque
-                ]
-            )
+            if famille == "--- Sélectionner ---":
+                errors.append("Sélectionnez une famille.")
 
-            if success:
+            if produit == "--- Sélectionner ---":
+                errors.append("Sélectionnez un produit.")
 
-                st.success(
-                    "✅ Distribution enregistrée."
+            if capacite == "--- Sélectionner ---":
+                errors.append("Sélectionnez une capacité/dimension.")
+
+            if errors:
+                for error in errors:
+                    st.error(error)
+            else:
+
+                append_row(
+                    SHEET_DISTRIBUTION,
+                    [
+                        str(uuid.uuid4()),
+                        str(date_visite),
+                        selected_pos,
+                        marque,
+                        categorie,
+                        famille,
+                        produit,
+                        capacite,
+                        int(quantite),
+                        st.session_state.user_id,
+                        remarque
+                    ]
                 )
 
-                time.sleep(1)
-
+                st.success("✅ Distribution enregistrée.")
                 st.rerun()
 
     st.markdown("---")
-
-    st.subheader(
-        "📋 Derniers relevés"
-    )
+    st.subheader("📋 Derniers relevés")
 
     if not df_distribution.empty:
-
         st.dataframe(
             df_distribution.tail(20),
             use_container_width=True,
             hide_index=True
         )
 
-    else:
-
-        st.info(
-            "Aucun relevé enregistré."
-        )
-
 
 # =========================================================
 # PROFIL CLIENT
 # =========================================================
-
 elif menu == "👤 Profil Client":
 
-    st.header(
-        "👤 Profil Client"
+    st.header("👤 Profil Client")
+
+    if df_pos.empty:
+        st.warning("La table POS est vide.")
+        st.stop()
+
+    pos_ids = unique_sorted(df_pos, "ID_POS")
+
+    selected_pos = st.selectbox(
+        "Point de vente",
+        ["--- Sélectionner ---"] + pos_ids
     )
 
-    df_pos = load_sheet(
-        SHEET_POS
-    )
+    if selected_pos != "--- Sélectionner ---":
 
-    df_profile = load_sheet(
-        SHEET_PROFILE
-    )
+        existing = pd.DataFrame()
 
-    st.info(
-        "Si le POS existe, sélectionnez-le pour "
-        "consulter/modifier son profil."
-    )
+        if not df_profile.empty and "ID_POS" in df_profile.columns:
+            existing = df_profile[
+                df_profile["ID_POS"].astype(str).str.strip()
+                == selected_pos
+            ]
 
-    tab_existing, tab_new = st.tabs(
-        [
-            "🔎 POS existant",
-            "➕ Nouveau POS"
-        ]
-    )
+        with st.form("profile_form"):
 
-    # -----------------------------------------------------
-    # POS EXISTANT
-    # -----------------------------------------------------
+            st.subheader("Informations du propriétaire")
 
-    with tab_existing:
+            col1, col2 = st.columns(2)
 
-        if df_pos.empty:
-
-            st.warning(
-                "La table POS est vide."
-            )
-
-        else:
-
-            selected_pos = st.selectbox(
-                "Point de vente",
-                ["--- Sélectionner ---"]
-                + unique_sorted(
-                    df_pos,
-                    "ID_POS"
-                ),
-                key="profile_existing_pos"
-            )
-
-            if selected_pos != "--- Sélectionner ---":
-
-                existing = pd.DataFrame()
-
-                if (
-                    not df_profile.empty
-                    and "ID_POS"
-                    in df_profile.columns
-                ):
-
-                    existing = df_profile[
-                        df_profile["ID_POS"]
-                        .astype(str)
-                        .str.strip()
-                        == selected_pos
-                    ]
-
-                pos_row = df_pos[
-                    df_pos["ID_POS"]
-                    .astype(str)
-                    .str.strip()
-                    == selected_pos
-                ]
-
-                pos_row = (
-                    pos_row.iloc[-1]
-                    if not pos_row.empty
-                    else None
-                )
-
-                profile = (
-                    existing.iloc[-1]
-                    if not existing.empty
-                    else None
-                )
-
-                if profile is not None:
-
-                    st.success(
-                        "✅ Profil existant trouvé."
-                    )
-
-                else:
-
-                    st.info(
-                        "ℹ️ Profil détaillé non renseigné."
-                    )
-
-                with st.form(
-                    "profile_form"
-                ):
-
-                    st.subheader(
-                        "🏪 Informations du POS"
-                    )
-
-                    c1, c2 = st.columns(2)
-
-                    with c1:
-
-                        nom_pos = st.text_input(
-                            "Nom POS",
-                            value=clean_text(
-                                pos_row.get(
-                                    "Nom_POS",
-                                    pos_row.get(
-                                        "Nom",
-                                        ""
-                                    )
-                                )
-                                if pos_row is not None
-                                else ""
-                            )
-                        )
-
-                        wilaya = st.text_input(
-                            "Wilaya",
-                            value=clean_text(
-                                pos_row.get(
-                                    "Wilaya",
-                                    ""
-                                )
-                                if pos_row is not None
-                                else ""
-                            )
-                        )
-
-                        commune = st.text_input(
-                            "Commune",
-                            value=clean_text(
-                                pos_row.get(
-                                    "Commune",
-                                    ""
-                                )
-                                if pos_row is not None
-                                else ""
-                            )
-                        )
-
-                        adresse = st.text_area(
-                            "Adresse",
-                            value=clean_text(
-                                pos_row.get(
-                                    "Adresse",
-                                    ""
-                                )
-                                if pos_row is not None
-                                else ""
-                            )
-                        )
-
-                    with c2:
-
-                        telephone = st.text_input(
-                            "Téléphone",
-                            value=clean_text(
-                                pos_row.get(
-                                    "Telephone",
-                                    pos_row.get(
-                                        "Téléphone",
-                                        ""
-                                    )
-                                )
-                                if pos_row is not None
-                                else ""
-                            )
-                        )
-
-                        email = st.text_input(
-                            "Email",
-                            value=clean_text(
-                                pos_row.get(
-                                    "Email",
-                                    ""
-                                )
-                                if pos_row is not None
-                                else ""
-                            )
-                        )
-
-                        current_status = clean_text(
-                            pos_row.get(
-                                "Statut",
-                                "Actif"
-                            )
-                            if pos_row is not None
-                            else "Actif"
-                        )
-
-                        statut = st.selectbox(
-                            "Statut",
-                            [
-                                "Actif",
-                                "Inactif"
-                            ],
-                            index=(
-                                1
-                                if current_status.lower()
-                                == "inactif"
-                                else 0
-                            )
-                        )
-
-                    st.subheader(
-                        "👤 Informations client"
-                    )
-
-                    c1, c2 = st.columns(2)
-
-                    with c1:
-
-                        nom_proprietaire = st.text_input(
-                            "Nom du propriétaire",
-                            value=clean_text(
-                                profile.get(
-                                    "Nom_Proprietaire",
-                                    ""
-                                )
-                                if profile is not None
-                                else ""
-                            )
-                        )
-
-                        contact_proprietaire = st.text_input(
-                            "Contact propriétaire",
-                            value=clean_text(
-                                profile.get(
-                                    "Contact_Proprietaire",
-                                    ""
-                                )
-                                if profile is not None
-                                else ""
-                            )
-                        )
-
-                        nom_facade = st.text_input(
-                            "Nom façade",
-                            value=clean_text(
-                                profile.get(
-                                    "Nom_Facade",
-                                    ""
-                                )
-                                if profile is not None
-                                else ""
-                            )
-                        )
-
-                        nom_acheteur = st.text_input(
-                            "Nom acheteur",
-                            value=clean_text(
-                                profile.get(
-                                    "Nom_Acheteur",
-                                    ""
-                                )
-                                if profile is not None
-                                else ""
-                            )
-                        )
-
-                        contact_acheteur = st.text_input(
-                            "Contact acheteur",
-                            value=clean_text(
-                                profile.get(
-                                    "Contact_Acheteur",
-                                    ""
-                                )
-                                if profile is not None
-                                else ""
-                            )
-                        )
-
-                    with c2:
-
-                        surface = st.number_input(
-                            "Surface magasin (m²)",
-                            min_value=0.0,
-                            step=1.0,
-                            value=float(
-                                profile.get(
-                                    "Surface_Magasin",
-                                    0
-                                )
-                                or 0
-                            )
-                            if profile is not None
-                            else 0.0
-                        )
-
-                        surface_expo = st.number_input(
-                            "Surface exposition (m²)",
-                            min_value=0.0,
-                            step=1.0,
-                            value=float(
-                                profile.get(
-                                    "Surface_Exposition",
-                                    0
-                                )
-                                or 0
-                            )
-                            if profile is not None
-                            else 0.0
-                        )
-
-                        vitrines = st.number_input(
-                            "Nombre de vitrines",
-                            min_value=0,
-                            step=1,
-                            value=int(
-                                float(
-                                    profile.get(
-                                        "Nombre_Vitrines",
-                                        0
-                                    )
-                                    or 0
-                                )
-                            )
-                            if profile is not None
-                            else 0
-                        )
-
-                        travailleurs = st.number_input(
-                            "Nombre de travailleurs",
-                            min_value=0,
-                            step=1,
-                            value=int(
-                                float(
-                                    profile.get(
-                                        "Nombre_Travailleurs",
-                                        0
-                                    )
-                                    or 0
-                                )
-                            )
-                            if profile is not None
-                            else 0
-                        )
-
-                        digital_value = clean_text(
-                            profile.get(
-                                "Presence_Digitale",
-                                "Non"
-                            )
-                            if profile is not None
-                            else "Non"
-                        )
-
-                        digital = st.selectbox(
-                            "Présence digitale",
-                            [
-                                "Oui",
-                                "Non"
-                            ],
-                            index=(
-                                0
-                                if digital_value.lower()
-                                in [
-                                    "oui",
-                                    "true",
-                                    "1"
-                                ]
-                                else 1
-                            )
-                        )
-
-                        ca_2025 = st.number_input(
-                            "Chiffre d'affaires 2025",
-                            min_value=0.0,
-                            step=1000.0,
-                            value=float(
-                                profile.get(
-                                    "CA_2025",
-                                    0
-                                )
-                                or 0
-                            )
-                            if profile is not None
-                            else 0.0
-                        )
-
-                    observation = st.text_area(
-                        "Observation",
-                        value=clean_text(
-                            profile.get(
-                                "Observation",
-                                profile.get(
-                                    "Remarque",
-                                    ""
-                                )
-                            )
-                            if profile is not None
-                            else ""
-                        )
-                    )
-
-                    save_profile = st.form_submit_button(
-                        "💾 Enregistrer le profil",
-                        use_container_width=True
-                    )
-
-                if save_profile:
-
-                    # -------------------------------------------------
-                    # Mise à jour POS
-                    # -------------------------------------------------
-
-                    try:
-
-                        ws = get_ws(
-                            SHEET_POS
-                        )
-
-                        headers = [
-                            str(x).strip()
-                            for x in ws.row_values(1)
-                        ]
-
-                        records = ws.get_all_records()
-
-                        found = False
-
-                        for idx, row in enumerate(
-                            records,
-                            start=2
-                        ):
-
-                            if (
-                                clean_text(
-                                    row.get(
-                                        "ID_POS",
-                                        ""
-                                    )
-                                )
-                                == selected_pos
-                            ):
-
-                                values = dict(row)
-
-                                aliases = {
-                                    "Nom_POS": nom_pos,
-                                    "Nom": nom_pos,
-                                    "Wilaya": wilaya,
-                                    "Commune": commune,
-                                    "Adresse": adresse,
-                                    "Telephone": telephone,
-                                    "Téléphone": telephone,
-                                    "Email": email,
-                                    "Statut": statut
-                                }
-
-                                values.update(
-                                    aliases
-                                )
-
-                                newrow = [
-                                    values.get(
-                                        h,
-                                        ""
-                                    )
-                                    for h in headers
-                                ]
-
-                                ws.update(
-                                    f"A{idx}",
-                                    [
-                                        newrow
-                                    ]
-                                )
-
-                                found = True
-
-                                break
-
-                        if not found:
-
-                            append_dict_row(
-                                SHEET_POS,
-                                {
-                                    "ID_POS": selected_pos,
-                                    "Nom_POS": nom_pos,
-                                    "Nom": nom_pos,
-                                    "Wilaya": wilaya,
-                                    "Commune": commune,
-                                    "Adresse": adresse,
-                                    "Telephone": telephone,
-                                    "Téléphone": telephone,
-                                    "Email": email,
-                                    "Statut": statut
-                                }
-                            )
-
-                        clear_sheet_cache(
-                            SHEET_POS
-                        )
-
-                        # -------------------------------------------------
-                        # Profil
-                        # -------------------------------------------------
-
-                        append_dict_row(
-                            SHEET_PROFILE,
-                            {
-                                "ID_Profil": str(
-                                    uuid.uuid4()
-                                ),
-                                "ID": str(
-                                    uuid.uuid4()
-                                ),
-                                "ID_POS": selected_pos,
-                                "Date": str(
-                                    datetime.now().date()
-                                ),
-                                "Date_Mise_A_Jour": str(
-                                    datetime.now()
-                                ),
-                                "Nom_Proprietaire":
-                                    nom_proprietaire,
-                                "Proprietaire":
-                                    nom_proprietaire,
-                                "Contact_Proprietaire":
-                                    contact_proprietaire,
-                                "Nom_Facade":
-                                    nom_facade,
-                                "Nom_Acheteur":
-                                    nom_acheteur,
-                                "Acheteur":
-                                    nom_acheteur,
-                                "Contact_Acheteur":
-                                    contact_acheteur,
-                                "Surface_Magasin":
-                                    surface,
-                                "Surface":
-                                    surface,
-                                "Surface_Exposition":
-                                    surface_expo,
-                                "Nombre_Vitrines":
-                                    vitrines,
-                                "Vitrines":
-                                    vitrines,
-                                "Nombre_Travailleurs":
-                                    travailleurs,
-                                "Travailleurs":
-                                    travailleurs,
-                                "Presence_Digitale":
-                                    digital == "Oui",
-                                "Présence_Digitale":
-                                    digital == "Oui",
-                                "CA_2025":
-                                    ca_2025,
-                                "Observation":
-                                    observation,
-                                "Remarque":
-                                    observation,
-                                "ID_User":
-                                    st.session_state.user_id
-                            }
-                        )
-
-                        st.success(
-                            "✅ Profil enregistré avec succès."
-                        )
-
-                        time.sleep(1)
-
-                        st.rerun()
-
-                    except Exception as e:
-
-                        st.error(
-                            f"❌ Erreur : {e}"
-                        )
-
-    # -----------------------------------------------------
-    # NOUVEAU POS
-    # -----------------------------------------------------
-
-    with tab_new:
-
-        with st.form(
-            "new_pos_form"
-        ):
-
-            st.subheader(
-                "➕ Nouveau POS"
-            )
-
-            c1, c2 = st.columns(2)
-
-            with c1:
-
-                new_id = st.text_input(
-                    "ID_POS *",
-                    value=(
-                        "POS-"
-                        + str(uuid.uuid4())[:8]
-                        .upper()
+            with col1:
+                nom_proprietaire = st.text_input(
+                    "Nom du propriétaire",
+                    value=clean_text(
+                        existing.iloc[-1].get("Nom_Proprietaire", "")
+                        if not existing.empty else ""
                     )
                 )
 
-                new_nom = st.text_input(
-                    "Nom POS *"
+                contact_proprietaire = st.text_input(
+                    "Contact propriétaire",
+                    value=clean_text(
+                        existing.iloc[-1].get("Contact_Proprietaire", "")
+                        if not existing.empty else ""
+                    )
                 )
 
-                new_wilaya = st.text_input(
-                    "Wilaya *"
+                nom_facade = st.text_input(
+                    "Nom façade",
+                    value=clean_text(
+                        existing.iloc[-1].get("Nom_Facade", "")
+                        if not existing.empty else ""
+                    )
                 )
 
-                new_commune = st.text_input(
-                    "Commune *"
+                nom_acheteur = st.text_input(
+                    "Nom acheteur",
+                    value=clean_text(
+                        existing.iloc[-1].get("Nom_Acheteur", "")
+                        if not existing.empty else ""
+                    )
                 )
 
-            with c2:
-
-                new_adresse = st.text_area(
-                    "Adresse"
+                contact_acheteur = st.text_input(
+                    "Contact acheteur",
+                    value=clean_text(
+                        existing.iloc[-1].get("Contact_Acheteur", "")
+                        if not existing.empty else ""
+                    )
                 )
 
-                new_tel = st.text_input(
-                    "Téléphone"
-                )
+            with col2:
 
-                new_email = st.text_input(
-                    "Email"
-                )
-
-                new_statut = st.selectbox(
-                    "Statut",
-                    [
-                        "Actif",
-                        "Inactif"
-                    ]
-                )
-
-            st.subheader(
-                "👤 Profil client"
-            )
-
-            c1, c2 = st.columns(2)
-
-            with c1:
-
-                p_nom = st.text_input(
-                    "Nom du propriétaire"
-                )
-
-                p_contact = st.text_input(
-                    "Contact propriétaire"
-                )
-
-                p_facade = st.text_input(
-                    "Nom façade"
-                )
-
-                p_acheteur = st.text_input(
-                    "Nom acheteur"
-                )
-
-                p_acheteur_contact = st.text_input(
-                    "Contact acheteur"
-                )
-
-            with c2:
-
-                p_surface = st.number_input(
+                surface = st.number_input(
                     "Surface magasin (m²)",
                     min_value=0.0,
-                    step=1.0
+                    step=1.0,
+                    value=0.0
                 )
 
-                p_expo = st.number_input(
-                    "Surface exposition (m²)",
-                    min_value=0.0,
-                    step=1.0
-                )
-
-                p_vitrines = st.number_input(
+                vitrines = st.number_input(
                     "Nombre de vitrines",
                     min_value=0,
-                    step=1
+                    step=1,
+                    value=0
                 )
 
-                p_workers = st.number_input(
+                travailleurs = st.number_input(
                     "Nombre de travailleurs",
                     min_value=0,
-                    step=1
+                    step=1,
+                    value=0
                 )
 
-                p_digital = st.selectbox(
+                digital = st.selectbox(
                     "Présence digitale",
-                    [
-                        "Oui",
-                        "Non"
-                    ]
+                    ["Oui", "Non"]
                 )
 
-                p_ca = st.number_input(
+                ca_2025 = st.number_input(
                     "Chiffre d'affaires 2025",
                     min_value=0.0,
-                    step=1000.0
+                    step=1000.0,
+                    value=0.0
                 )
 
-            p_obs = st.text_area(
-                "Observation"
-            )
+            remarque = st.text_area("Remarque")
 
-            create = st.form_submit_button(
-                "💾 Enregistrer le nouveau POS et son profil",
+            save_profile = st.form_submit_button(
+                "💾 Enregistrer le profil",
                 use_container_width=True
             )
 
-        if create:
+            if save_profile:
 
-            errors = []
-
-            if not new_id.strip():
-                errors.append(
-                    "ID_POS obligatoire."
+                append_row(
+                    SHEET_PROFILE,
+                    [
+                        str(uuid.uuid4()),
+                        selected_pos,
+                        str(datetime.now().date()),
+                        nom_proprietaire,
+                        contact_proprietaire,
+                        nom_facade,
+                        nom_acheteur,
+                        contact_acheteur,
+                        surface,
+                        vitrines,
+                        travailleurs,
+                        digital == "Oui",
+                        ca_2025,
+                        remarque,
+                        st.session_state.user_id
+                    ]
                 )
 
-            if not new_nom.strip():
-                errors.append(
-                    "Nom POS obligatoire."
-                )
-
-            if not new_wilaya.strip():
-                errors.append(
-                    "Wilaya obligatoire."
-                )
-
-            if not new_commune.strip():
-                errors.append(
-                    "Commune obligatoire."
-                )
-
-            if (
-                new_id.strip()
-                in unique_sorted(
-                    df_pos,
-                    "ID_POS"
-                )
-            ):
-                errors.append(
-                    "Cet ID_POS existe déjà."
-                )
-
-            if errors:
-
-                for e in errors:
-                    st.error(e)
-
-            else:
-
-                success1 = append_dict_row(
-                    SHEET_POS,
-                    {
-                        "ID_POS": new_id.strip(),
-                        "Nom_POS": new_nom.strip(),
-                        "Nom": new_nom.strip(),
-                        "Wilaya": new_wilaya,
-                        "Commune": new_commune,
-                        "Adresse": new_adresse,
-                        "Telephone": new_tel,
-                        "Téléphone": new_tel,
-                        "Email": new_email,
-                        "Statut": new_statut,
-                        "Date_Creation":
-                            str(
-                                datetime.now().date()
-                            )
-                    }
-                )
-
-                if success1:
-
-                    append_dict_row(
-                        SHEET_PROFILE,
-                        {
-                            "ID_Profil": str(
-                                uuid.uuid4()
-                            ),
-                            "ID": str(
-                                uuid.uuid4()
-                            ),
-                            "ID_POS":
-                                new_id.strip(),
-                            "Date":
-                                str(
-                                    datetime.now().date()
-                                ),
-                            "Date_Mise_A_Jour":
-                                str(
-                                    datetime.now()
-                                ),
-                            "Nom_Proprietaire":
-                                p_nom,
-                            "Proprietaire":
-                                p_nom,
-                            "Contact_Proprietaire":
-                                p_contact,
-                            "Nom_Facade":
-                                p_facade,
-                            "Nom_Acheteur":
-                                p_acheteur,
-                            "Acheteur":
-                                p_acheteur,
-                            "Contact_Acheteur":
-                                p_acheteur_contact,
-                            "Surface_Magasin":
-                                p_surface,
-                            "Surface":
-                                p_surface,
-                            "Surface_Exposition":
-                                p_expo,
-                            "Nombre_Vitrines":
-                                p_vitrines,
-                            "Vitrines":
-                                p_vitrines,
-                            "Nombre_Travailleurs":
-                                p_workers,
-                            "Travailleurs":
-                                p_workers,
-                            "Presence_Digitale":
-                                p_digital == "Oui",
-                            "Présence_Digitale":
-                                p_digital == "Oui",
-                            "CA_2025":
-                                p_ca,
-                            "Observation":
-                                p_obs,
-                            "Remarque":
-                                p_obs,
-                            "ID_User":
-                                st.session_state.user_id
-                        }
-                    )
-
-                    st.success(
-                        "✅ Nouveau POS et profil enregistrés."
-                    )
-
-                    time.sleep(1)
-
-                    st.rerun()
+                st.success("✅ Profil client enregistré.")
+                st.rerun()
 
 
 # =========================================================
 # RELEVE PRIX
 # =========================================================
-
 elif menu == "💰 Relevé Prix":
 
-    st.header(
-        "💰 Relevé Prix"
-    )
+    st.header("💰 Relevé Prix")
 
-    df_pos = load_sheet(
-        SHEET_POS
-    )
-
-    df_products = load_sheet(
-        SHEET_PRODUCTS
-    )
-
-    if (
-        df_pos.empty
-        or df_products.empty
-    ):
-
-        st.warning(
-            "Les tables POS et Produits "
-            "doivent être renseignées."
-        )
-
+    if df_pos.empty or df_products.empty:
+        st.warning("Les tables POS et Produits doivent être renseignées.")
         st.stop()
+
+    pos_values = unique_sorted(df_pos, "ID_POS")
 
     pos = st.selectbox(
         "POS",
-        ["--- Sélectionner ---"]
-        + unique_sorted(
-            df_pos,
-            "ID_POS"
-        ),
-        key="price_pos"
+        ["--- Sélectionner ---"] + pos_values
     )
 
-    (
-        marque,
-        categorie,
-        famille,
-        produit,
-        capacite
-    ) = product_cascade(
+    marque_values = unique_sorted(df_products, "Marque")
+
+    marque = st.selectbox(
+        "Marque",
+        ["--- Sélectionner ---"] + marque_values
+    )
+
+    temp = filter_products(
         df_products,
-        prefix="price"
+        marque="" if marque.startswith("---") else marque
+    )
+
+    categorie = st.selectbox(
+        "Catégorie",
+        ["--- Sélectionner ---"] + unique_sorted(temp, "Catégorie")
+    )
+
+    temp = filter_products(
+        df_products,
+        marque="" if marque.startswith("---") else marque,
+        categorie="" if categorie.startswith("---") else categorie
+    )
+
+    famille = st.selectbox(
+        "Famille",
+        ["--- Sélectionner ---"] + unique_sorted(temp, "Famille")
+    )
+
+    temp = filter_products(
+        df_products,
+        marque="" if marque.startswith("---") else marque,
+        categorie="" if categorie.startswith("---") else categorie,
+        famille="" if famille.startswith("---") else famille
+    )
+
+    produit = st.selectbox(
+        "Produit",
+        ["--- Sélectionner ---"] + unique_sorted(temp, "Produit")
+    )
+
+    temp = filter_products(
+        df_products,
+        marque="" if marque.startswith("---") else marque,
+        categorie="" if categorie.startswith("---") else categorie,
+        famille="" if famille.startswith("---") else famille,
+        produit="" if produit.startswith("---") else produit
+    )
+
+    capacite = st.selectbox(
+        "Capacité / Dimension",
+        ["--- Sélectionner ---"]
+        + unique_sorted(temp, "Capacité_Dimension")
     )
 
     col1, col2 = st.columns(2)
 
     with col1:
-
         prix = st.number_input(
             "Prix de vente",
             min_value=0.0,
-            step=100.0,
-            key="price_value"
+            step=100.0
         )
 
     with col2:
-
         promo = st.selectbox(
             "En promotion ?",
-            [
-                "Non",
-                "Oui"
-            ],
-            key="price_promo"
+            ["Non", "Oui"]
         )
 
     prix_promo = st.number_input(
         "Prix promotionnel",
         min_value=0.0,
-        step=100.0,
-        key="price_promo_value"
+        step=100.0
     )
 
     date_releve = st.date_input(
         "Date du relevé",
-        value=datetime.now().date(),
-        key="price_date"
+        value=datetime.now().date()
     )
 
-    remarque = st.text_area(
-        "Remarque",
-        key="price_remarque"
-    )
+    remarque = st.text_area("Remarque")
 
     if st.button(
         "💾 Enregistrer le prix",
-        use_container_width=True,
-        key="save_price"
+        use_container_width=True
     ):
 
         errors = []
 
         if pos == "--- Sélectionner ---":
-            errors.append(
-                "Sélectionnez un POS."
-            )
+            errors.append("Sélectionnez un POS.")
 
         if marque == "--- Sélectionner ---":
-            errors.append(
-                "Sélectionnez une marque."
-            )
+            errors.append("Sélectionnez une marque.")
 
         if categorie == "--- Sélectionner ---":
-            errors.append(
-                "Sélectionnez une catégorie."
-            )
+            errors.append("Sélectionnez une catégorie.")
 
         if famille == "--- Sélectionner ---":
-            errors.append(
-                "Sélectionnez une famille."
-            )
+            errors.append("Sélectionnez une famille.")
 
         if produit == "--- Sélectionner ---":
-            errors.append(
-                "Sélectionnez un produit."
-            )
+            errors.append("Sélectionnez un produit.")
 
         if capacite == "--- Sélectionner ---":
-            errors.append(
-                "Sélectionnez une capacité/dimension."
-            )
+            errors.append("Sélectionnez une capacité/dimension.")
 
         if prix <= 0:
-            errors.append(
-                "Le prix doit être supérieur à 0."
-            )
+            errors.append("Le prix doit être supérieur à 0.")
 
         if errors:
-
             for error in errors:
                 st.error(error)
-
         else:
 
-            success = append_row(
+            append_row(
                 SHEET_PRICES,
                 [
                     str(uuid.uuid4()),
@@ -2230,222 +828,176 @@ elif menu == "💰 Relevé Prix":
                     produit,
                     capacite,
                     prix,
-                    (
-                        prix_promo
-                        if promo == "Oui"
-                        else 0
-                    ),
+                    prix_promo if promo == "Oui" else 0,
                     promo == "Oui",
                     remarque,
                     st.session_state.user_id
                 ]
             )
 
-            if success:
-
-                st.success(
-                    "✅ Relevé prix enregistré."
-                )
-
-                time.sleep(1)
-
-                st.rerun()
+            st.success("✅ Relevé prix enregistré.")
+            st.rerun()
 
 
 # =========================================================
 # ENQUETE
 # =========================================================
-
 elif menu == "📝 Enquête":
 
-    st.header(
-        "📝 Enquête"
-    )
+    st.header("📝 Enquête")
 
-    df_pos = load_sheet(
-        SHEET_POS
-    )
-
-    df_products = load_sheet(
-        SHEET_PRODUCTS
-    )
-
-    df_subjects = load_sheet(
-        SHEET_SURVEY_SUBJECTS
-    )
-
-    if (
-        df_pos.empty
-        or df_products.empty
-    ):
-
-        st.warning(
-            "Les tables POS et Produits "
-            "doivent être renseignées."
-        )
-
+    if df_pos.empty or df_products.empty:
+        st.warning("Les tables POS et Produits doivent être renseignées.")
         st.stop()
 
     if df_subjects.empty:
-
         st.warning(
-            "Aucun sujet d'enquête disponible."
+            "Aucun sujet d'enquête disponible. "
+            "Ajoutez d'abord des lignes dans Enquetes_Sujets."
         )
-
         st.stop()
+
+    subject_values = unique_sorted(df_subjects, "Nom_Enquete")
 
     sujet = st.selectbox(
         "Sujet de l'enquête",
-        ["--- Sélectionner ---"]
-        + unique_sorted(
-            df_subjects,
-            "Nom_Enquete"
-        ),
-        key="survey_subject"
+        ["--- Sélectionner ---"] + subject_values
     )
+
+    pos_values = unique_sorted(df_pos, "ID_POS")
 
     pos = st.selectbox(
         "Point de vente",
-        ["--- Sélectionner ---"]
-        + unique_sorted(
-            df_pos,
-            "ID_POS"
-        ),
-        key="survey_pos"
+        ["--- Sélectionner ---"] + pos_values
     )
 
-    st.subheader(
-        "Produit observé"
+    st.subheader("Produit observé")
+
+    marque_exposee = st.text_input(
+        "Marque exposée"
     )
 
-    marques_exposees = st.multiselect(
-        "Marques exposées",
-        unique_sorted(
-            df_products,
-            "Marque"
-        ),
-        key="survey_exposed_brands"
+    marque = st.selectbox(
+        "Marque du produit",
+        ["--- Sélectionner ---"] + unique_sorted(df_products, "Marque")
     )
 
-    (
-        marque,
-        categorie,
-        famille,
-        produit,
-        capacite
-    ) = product_cascade(
+    temp = filter_products(
         df_products,
-        prefix="survey"
+        marque="" if marque.startswith("---") else marque
+    )
+
+    categorie = st.selectbox(
+        "Catégorie",
+        ["--- Sélectionner ---"] + unique_sorted(temp, "Catégorie")
+    )
+
+    temp = filter_products(
+        df_products,
+        marque="" if marque.startswith("---") else marque,
+        categorie="" if categorie.startswith("---") else categorie
+    )
+
+    famille = st.selectbox(
+        "Famille",
+        ["--- Sélectionner ---"] + unique_sorted(temp, "Famille")
+    )
+
+    temp = filter_products(
+        df_products,
+        marque="" if marque.startswith("---") else marque,
+        categorie="" if categorie.startswith("---") else categorie,
+        famille="" if famille.startswith("---") else famille
+    )
+
+    produit = st.selectbox(
+        "Produit",
+        ["--- Sélectionner ---"] + unique_sorted(temp, "Produit")
+    )
+
+    temp = filter_products(
+        df_products,
+        marque="" if marque.startswith("---") else marque,
+        categorie="" if categorie.startswith("---") else categorie,
+        famille="" if famille.startswith("---") else famille,
+        produit="" if produit.startswith("---") else produit
+    )
+
+    capacite = st.selectbox(
+        "Capacité / Dimension",
+        ["--- Sélectionner ---"]
+        + unique_sorted(temp, "Capacité_Dimension")
     )
 
     col1, col2 = st.columns(2)
 
     with col1:
-
         prix = st.number_input(
             "Prix",
             min_value=0.0,
-            step=100.0,
-            key="survey_price"
+            step=100.0
         )
 
         stock = st.selectbox(
             "Stock disponible ?",
-            [
-                "Oui",
-                "Non"
-            ],
-            key="survey_stock"
+            ["Oui", "Non"]
         )
 
     with col2:
-
         promo = st.selectbox(
             "En promotion ?",
-            [
-                "Oui",
-                "Non"
-            ],
-            key="survey_promo"
+            ["Oui", "Non"]
         )
 
         frequence = st.number_input(
             "Fréquence de vente / jour",
             min_value=0.0,
-            step=1.0,
-            key="survey_frequency"
+            step=1.0
         )
 
-    remarque = st.text_area(
-        "Remarque",
-        key="survey_remark"
-    )
+    remarque = st.text_area("Remarque")
 
     if st.button(
         "💾 Enregistrer l'enquête",
-        use_container_width=True,
-        key="save_survey"
+        use_container_width=True
     ):
 
         errors = []
 
         if sujet == "--- Sélectionner ---":
-            errors.append(
-                "Sélectionnez le sujet de l'enquête."
-            )
+            errors.append("Sélectionnez le sujet de l'enquête.")
 
         if pos == "--- Sélectionner ---":
-            errors.append(
-                "Sélectionnez le POS."
-            )
-
-        if not marques_exposees:
-            errors.append(
-                "Sélectionnez au moins une marque exposée."
-            )
+            errors.append("Sélectionnez le POS.")
 
         if marque == "--- Sélectionner ---":
-            errors.append(
-                "Sélectionnez une marque."
-            )
+            errors.append("Sélectionnez une marque.")
 
         if categorie == "--- Sélectionner ---":
-            errors.append(
-                "Sélectionnez une catégorie."
-            )
+            errors.append("Sélectionnez une catégorie.")
 
         if famille == "--- Sélectionner ---":
-            errors.append(
-                "Sélectionnez une famille."
-            )
+            errors.append("Sélectionnez une famille.")
 
         if produit == "--- Sélectionner ---":
-            errors.append(
-                "Sélectionnez un produit."
-            )
+            errors.append("Sélectionnez un produit.")
 
         if capacite == "--- Sélectionner ---":
-            errors.append(
-                "Sélectionnez une capacité/dimension."
-            )
+            errors.append("Sélectionnez une capacité/dimension.")
 
         if errors:
-
             for error in errors:
                 st.error(error)
-
         else:
 
-            success = append_row(
+            append_row(
                 SHEET_SURVEYS,
                 [
                     str(uuid.uuid4()),
                     str(datetime.now().date()),
                     sujet,
                     pos,
-                    ", ".join(
-                        marques_exposees
-                    ),
+                    marque_exposee,
                     marque,
                     categorie,
                     famille,
@@ -2460,1204 +1012,139 @@ elif menu == "📝 Enquête":
                 ]
             )
 
-            if success:
-
-                st.success(
-                    "✅ Enquête enregistrée."
-                )
-
-                time.sleep(1)
-
-                st.rerun()
-
-
-# =========================================================
-# MATERIEL POS
-# =========================================================
-
-elif menu == "🧰 Matériel POS":
-
-    st.header(
-        "🧰 Gestion du matériel installé dans les POS"
-    )
-
-    df_pos = load_sheet(
-        SHEET_POS
-    )
-
-    df_products = load_sheet(
-        SHEET_PRODUCTS
-    )
-
-    df_material_types = load_sheet(
-        SHEET_MATERIAL_TYPES
-    )
-
-    df_material_pos = load_sheet(
-        SHEET_MATERIAL_POS
-    )
-
-    df_material_control = load_sheet(
-        SHEET_MATERIAL_CONTROL
-    )
-
-    # Correction : la partie Contrôle du matériel utilise aussi
-    # les données de Distribution pour vérifier la conformité de la
-    # marque du matériel avec les produits présents dans le POS.
-    # Il faut donc charger df_distribution dans ce module également.
-    df_distribution = load_sheet(
-        SHEET_DISTRIBUTION
-    )
-
-    st.info(
-        "Suivi des tinda, logos, présentoirs, racks, "
-        "vitrines, posters, affichage et autres matériels."
-    )
-
-    tab_add, tab_control, tab_history = st.tabs(
-        [
-            "➕ Installer / enregistrer",
-            "🔎 Contrôler",
-            "📋 Historique"
-        ]
-    )
-
-    # -----------------------------------------------------
-    # AJOUT
-    # -----------------------------------------------------
-
-    with tab_add:
-
-        if df_pos.empty:
-
-            st.warning(
-                "La table POS est vide."
-            )
-
-        elif df_material_types.empty:
-
-            st.warning(
-                "La table Types_Materiel est vide."
-            )
-
-        else:
-
-            pos = st.selectbox(
-                "Point de vente",
-                ["--- Sélectionner ---"]
-                + unique_sorted(
-                    df_pos,
-                    "ID_POS"
-                ),
-                key="mat_pos"
-            )
-
-            type_mat = st.selectbox(
-                "Type de matériel",
-                ["--- Sélectionner ---"]
-                + unique_sorted(
-                    df_material_types,
-                    "Type_Materiel"
-                ),
-                key="mat_type"
-            )
-
-            type_row = None
-
-            if type_mat != "--- Sélectionner ---":
-
-                tmp = df_material_types[
-                    df_material_types[
-                        "Type_Materiel"
-                    ]
-                    .astype(str)
-                    .str.strip()
-                    == type_mat
-                ]
-
-                if not tmp.empty:
-
-                    type_row = tmp.iloc[-1]
-
-            categorie_mat = clean_text(
-                type_row.get(
-                    "Categorie_Materiel",
-                    type_row.get(
-                        "Catégorie_Materiel",
-                        ""
-                    )
-                )
-                if type_row is not None
-                else ""
-            )
-
-            if categorie_mat:
-
-                st.caption(
-                    f"Catégorie : **{categorie_mat}**"
-                )
-
-            c1, c2 = st.columns(2)
-
-            with c1:
-
-                marque_mat = st.selectbox(
-                    "Marque du matériel",
-                    ["--- Sélectionner ---"]
-                    + unique_sorted(
-                        df_products,
-                        "Marque"
-                    ),
-                    key="mat_brand"
-                )
-
-                reference = st.text_input(
-                    "Référence matériel"
-                )
-
-                quantite = st.number_input(
-                    "Quantité",
-                    min_value=1,
-                    value=1,
-                    step=1
-                )
-
-            with c2:
-
-                date_install = st.date_input(
-                    "Date d'installation",
-                    value=datetime.now().date()
-                )
-
-                etat = st.selectbox(
-                    "État",
-                    [
-                        "Neuf",
-                        "Bon état",
-                        "État moyen",
-                        "Mauvais état",
-                        "À remplacer"
-                    ]
-                )
-
-                fonctionnel = st.selectbox(
-                    "Fonctionnel ?",
-                    [
-                        "Oui",
-                        "Non"
-                    ]
-                )
-
-            emplacement = st.text_input(
-                "Emplacement"
-            )
-
-            photo = st.file_uploader(
-                "Photo du matériel",
-                type=[
-                    "jpg",
-                    "jpeg",
-                    "png"
-                ]
-            )
-
-            observation = st.text_area(
-                "Observation"
-            )
-
-            if st.button(
-                "💾 Enregistrer le matériel",
-                use_container_width=True,
-                key="save_mat"
-            ):
-
-                errors = []
-
-                if pos == "--- Sélectionner ---":
-                    errors.append(
-                        "Sélectionnez un POS."
-                    )
-
-                if type_mat == "--- Sélectionner ---":
-                    errors.append(
-                        "Sélectionnez le type de matériel."
-                    )
-
-                if marque_mat == "--- Sélectionner ---":
-                    errors.append(
-                        "Sélectionnez la marque du matériel."
-                    )
-
-                if errors:
-
-                    for e in errors:
-                        st.error(e)
-
-                else:
-
-                    photo_url = ""
-                    if photo is not None:
-                        with st.spinner("📤 Envoi de la photo vers Google Drive..."):
-                            photo_url = upload_photo_to_drive(
-                                photo,
-                                prefix="materiel"
-                            )
-
-                        if not photo_url:
-                            st.error(
-                                "❌ La photo n'a pas pu être enregistrée. "
-                                "Le matériel n'a pas été ajouté."
-                            )
-                            st.stop()
-
-                    success = append_dict_row(
-                        SHEET_MATERIAL_POS,
-                        {
-                            "ID_Materiel":
-                                str(uuid.uuid4()),
-                            "ID":
-                                str(uuid.uuid4()),
-                            "Date_Installation":
-                                str(date_install),
-                            "Date":
-                                str(date_install),
-                            "ID_POS":
-                                pos,
-                            "ID_Type_Materiel":
-                                clean_text(
-                                    type_row.get(
-                                        "ID_Type_Materiel",
-                                        ""
-                                    )
-                                    if type_row is not None
-                                    else ""
-                                ),
-                            "Type_Materiel":
-                                type_mat,
-                            "Categorie_Materiel":
-                                categorie_mat,
-                            "Catégorie_Materiel":
-                                categorie_mat,
-                            "Marque_Materiel":
-                                marque_mat,
-                            "Reference_Materiel":
-                                reference,
-                            "Référence_Materiel":
-                                reference,
-                            "Quantite":
-                                quantite,
-                            "Quantité":
-                                quantite,
-                            "Etat":
-                                etat,
-                            "Fonctionnel":
-                                fonctionnel == "Oui",
-                            "Emplacement":
-                                emplacement,
-                            "Photo":
-                                photo_url,
-                            "Observation":
-                                observation,
-                            "ID_User":
-                                st.session_state.user_id
-                        }
-                    )
-
-                    if success:
-
-                        st.success(
-                            "✅ Matériel enregistré."
-                        )
-
-                        time.sleep(1)
-
-                        st.rerun()
-
-    # -----------------------------------------------------
-    # CONTROLE
-    # -----------------------------------------------------
-
-    with tab_control:
-
-        if (
-            df_pos.empty
-            or df_material_pos.empty
-        ):
-
-            st.info(
-                "Enregistrez d'abord un matériel."
-            )
-
-        else:
-
-            pos_c = st.selectbox(
-                "POS à contrôler",
-                ["--- Sélectionner ---"]
-                + unique_sorted(
-                    df_pos,
-                    "ID_POS"
-                ),
-                key="control_pos"
-            )
-
-            if pos_c != "--- Sélectionner ---":
-
-                mats = df_material_pos[
-                    df_material_pos[
-                        "ID_POS"
-                    ]
-                    .astype(str)
-                    .str.strip()
-                    == pos_c
-                ]
-
-                if mats.empty:
-
-                    st.info(
-                        "Aucun matériel pour ce POS."
-                    )
-
-                else:
-
-                    labels = []
-
-                    for idx, row in mats.iterrows():
-
-                        labels.append(
-                            (
-                                f'{clean_text(row.get("Type_Materiel",""))} | '
-                                f'{clean_text(row.get("Marque_Materiel",""))} | '
-                                f'{clean_text(row.get("ID_Materiel",row.get("ID","")))}',
-                                idx
-                            )
-                        )
-
-                    label = st.selectbox(
-                        "Matériel",
-                        [
-                            x[0]
-                            for x in labels
-                        ],
-                        key="control_mat"
-                    )
-
-                    idx = next(
-                        x[1]
-                        for x in labels
-                        if x[0] == label
-                    )
-
-                    row = mats.loc[idx]
-
-                    brand = clean_text(
-                        row.get(
-                            "Marque_Materiel",
-                            ""
-                        )
-                    )
-
-                    conform = "Non"
-
-                    if (
-                        not df_distribution.empty
-                        and "Marque"
-                        in df_distribution.columns
-                    ):
-
-                        d = df_distribution[
-                            df_distribution[
-                                "ID_POS"
-                            ]
-                            .astype(str)
-                            .str.strip()
-                            == pos_c
-                        ]
-
-                        brands = set(
-                            d["Marque"]
-                            .astype(str)
-                            .str.strip()
-                            .str.lower()
-                        )
-
-                        if brand.lower() in brands:
-                            conform = "Oui"
-
-                    st.info(
-                        f"Produit de la marque "
-                        f"**{brand}** présent : "
-                        f"**{conform}**"
-                    )
-
-                    c1, c2 = st.columns(2)
-
-                    with c1:
-
-                        dcontrol = st.date_input(
-                            "Date du contrôle",
-                            value=datetime.now().date(),
-                            key="dc"
-                        )
-
-                        econtrol = st.selectbox(
-                            "État constaté",
-                            [
-                                "Neuf",
-                                "Bon état",
-                                "État moyen",
-                                "Mauvais état",
-                                "À remplacer"
-                            ],
-                            key="ec"
-                        )
-
-                    with c2:
-
-                        fcontrol = st.selectbox(
-                            "Fonctionnel ?",
-                            [
-                                "Oui",
-                                "Non"
-                            ],
-                            key="fc"
-                        )
-
-                        action = st.selectbox(
-                            "Action nécessaire",
-                            [
-                                "Aucune",
-                                "Maintenance",
-                                "Réparation",
-                                "Remplacement",
-                                "Retrait",
-                                "Nouvelle installation"
-                            ],
-                            key="ac"
-                        )
-
-                    photo_c = st.file_uploader(
-                        "Photo du contrôle",
-                        type=[
-                            "jpg",
-                            "jpeg",
-                            "png"
-                        ],
-                        key="pc"
-                    )
-
-                    obs_c = st.text_area(
-                        "Observation",
-                        key="oc"
-                    )
-
-                    if st.button(
-                        "💾 Enregistrer le contrôle",
-                        use_container_width=True,
-                        key="save_control"
-                    ):
-
-                        photo_control_url = ""
-                        if photo_c is not None:
-                            with st.spinner("📤 Envoi de la photo du contrôle vers Google Drive..."):
-                                photo_control_url = upload_photo_to_drive(
-                                    photo_c,
-                                    prefix="controle_materiel"
-                                )
-
-                            if not photo_control_url:
-                                st.error(
-                                    "❌ La photo du contrôle n'a pas pu être enregistrée. "
-                                    "Le contrôle n'a pas été enregistré."
-                                )
-                                st.stop()
-
-                        success = append_dict_row(
-                            SHEET_MATERIAL_CONTROL,
-                            {
-                                "ID_Controle":
-                                    str(uuid.uuid4()),
-                                "ID":
-                                    str(uuid.uuid4()),
-                                "Date_Controle":
-                                    str(dcontrol),
-                                "Date":
-                                    str(dcontrol),
-                                "ID_POS":
-                                    pos_c,
-                                "ID_Materiel":
-                                    clean_text(
-                                        row.get(
-                                            "ID_Materiel",
-                                            row.get(
-                                                "ID",
-                                                ""
-                                            )
-                                        )
-                                    ),
-                                "Etat":
-                                    econtrol,
-                                "Fonctionnel":
-                                    fcontrol == "Oui",
-                                "Conforme_Marque":
-                                    conform == "Oui",
-                                "Produit_Marque_Presente":
-                                    conform == "Oui",
-                                "Photo":
-                                    photo_control_url,
-                                "Observation":
-                                    obs_c,
-                                "Action_Necessaire":
-                                    action,
-                                "ID_User":
-                                    st.session_state.user_id
-                            }
-                        )
-
-                        if success:
-
-                            st.success(
-                                "✅ Contrôle enregistré."
-                            )
-
-                            time.sleep(1)
-
-                            st.rerun()
-
-    # -----------------------------------------------------
-    # HISTORIQUE
-    # -----------------------------------------------------
-
-    with tab_history:
-
-        st.subheader(
-            "📋 Matériels installés"
-        )
-
-        if not df_material_pos.empty:
-
-            st.dataframe(
-                df_material_pos,
-                use_container_width=True,
-                hide_index=True
-            )
-
-        else:
-
-            st.info(
-                "Aucun matériel enregistré."
-            )
-
-        st.subheader(
-            "🔎 Contrôles effectués"
-        )
-
-        if not df_material_control.empty:
-
-            st.dataframe(
-                df_material_control,
-                use_container_width=True,
-                hide_index=True
-            )
-
-        else:
-
-            st.info(
-                "Aucun contrôle enregistré."
-            )
-
-
-# =========================================================
-# VISITES POS
-# =========================================================
-
-elif menu == "🚗 Visites POS":
-
-    st.header(
-        "🚗 Visites POS"
-    )
-
-    df_pos = load_sheet(
-        SHEET_POS
-    )
-
-    df_visits = load_sheet(
-        SHEET_VISITS
-    )
-
-    if df_pos.empty:
-
-        st.warning(
-            "La table POS est vide."
-        )
-
-        st.stop()
-
-    st.subheader(
-        "📝 Nouvelle visite"
-    )
-
-    pos = st.selectbox(
-        "Point de vente",
-        ["--- Sélectionner ---"]
-        + unique_sorted(
-            df_pos,
-            "ID_POS"
-        ),
-        key="visit_pos"
-    )
-
-    date_visite = st.date_input(
-        "Date de visite",
-        value=datetime.now().date(),
-        key="visit_date"
-    )
-
-    motif = st.text_input(
-        "Motif de la visite",
-        key="visit_reason"
-    )
-
-    resultat = st.selectbox(
-        "Résultat",
-        [
-            "Visite effectuée",
-            "POS fermé",
-            "Responsable absent",
-            "Refus",
-            "Autre"
-        ],
-        key="visit_result"
-    )
-
-    observation = st.text_area(
-        "Observation",
-        key="visit_observation"
-    )
-
-    if st.button(
-        "💾 Enregistrer la visite",
-        use_container_width=True,
-        key="save_visit"
-    ):
-
-        errors = []
-
-        if pos == "--- Sélectionner ---":
-
-            errors.append(
-                "Sélectionnez un POS."
-            )
-
-        if errors:
-
-            for e in errors:
-                st.error(e)
-
-        else:
-
-            success = append_dict_row(
-                SHEET_VISITS,
-                {
-                    "ID_Visite":
-                        str(uuid.uuid4()),
-                    "ID":
-                        str(uuid.uuid4()),
-                    "Date_Visite":
-                        str(date_visite),
-                    "Date":
-                        str(date_visite),
-                    "ID_POS":
-                        pos,
-                    "Motif":
-                        motif,
-                    "Resultat":
-                        resultat,
-                    "Résultat":
-                        resultat,
-                    "Observation":
-                        observation,
-                    "ID_User":
-                        st.session_state.user_id
-                }
-            )
-
-            if success:
-
-                st.success(
-                    "✅ Visite enregistrée."
-                )
-
-                time.sleep(1)
-
-                st.rerun()
-
-    st.markdown("---")
-
-    st.subheader(
-        "📋 Historique des visites"
-    )
-
-    if not df_visits.empty:
-
-        st.dataframe(
-            df_visits.tail(50),
-            use_container_width=True,
-            hide_index=True
-        )
-
-    else:
-
-        st.info(
-            "Aucune visite enregistrée."
-        )
-
-
-# =========================================================
-# OBJECTIFS POS
-# =========================================================
-
-elif menu == "🎯 Objectifs POS":
-
-    st.header(
-        "🎯 Objectifs POS"
-    )
-
-    df_pos = load_sheet(
-        SHEET_POS
-    )
-
-    df_objectives = load_sheet(
-        SHEET_OBJECTIVES
-    )
-
-    if df_pos.empty:
-
-        st.warning(
-            "La table POS est vide."
-        )
-
-        st.stop()
-
-    st.subheader(
-        "🎯 Nouvel objectif"
-    )
-
-    pos = st.selectbox(
-        "Point de vente",
-        ["--- Sélectionner ---"]
-        + unique_sorted(
-            df_pos,
-            "ID_POS"
-        ),
-        key="objective_pos"
-    )
-
-    annee = st.number_input(
-        "Année",
-        min_value=2020,
-        max_value=2100,
-        value=datetime.now().year,
-        step=1
-    )
-
-    objectif_type = st.selectbox(
-        "Type d'objectif",
-        [
-            "CA",
-            "Volume",
-            "Nombre de commandes",
-            "Distribution",
-            "Autre"
-        ]
-    )
-
-    objectif = st.number_input(
-        "Objectif",
-        min_value=0.0,
-        step=1.0
-    )
-
-    commentaire = st.text_area(
-        "Commentaire"
-    )
-
-    if st.button(
-        "💾 Enregistrer l'objectif",
-        use_container_width=True,
-        key="save_objective"
-    ):
-
-        if pos == "--- Sélectionner ---":
-
-            st.error(
-                "Sélectionnez un POS."
-            )
-
-        elif objectif <= 0:
-
-            st.error(
-                "L'objectif doit être supérieur à 0."
-            )
-
-        else:
-
-            success = append_dict_row(
-                SHEET_OBJECTIVES,
-                {
-                    "ID_Objectif":
-                        str(uuid.uuid4()),
-                    "ID":
-                        str(uuid.uuid4()),
-                    "Date":
-                        str(datetime.now().date()),
-                    "Annee":
-                        int(annee),
-                    "Année":
-                        int(annee),
-                    "ID_POS":
-                        pos,
-                    "Type_Objectif":
-                        objectif_type,
-                    "Objectif":
-                        objectif,
-                    "Commentaire":
-                        commentaire,
-                    "ID_User":
-                        st.session_state.user_id
-                }
-            )
-
-            if success:
-
-                st.success(
-                    "✅ Objectif enregistré."
-                )
-
-                time.sleep(1)
-
-                st.rerun()
-
-    st.markdown("---")
-
-    st.subheader(
-        "📋 Objectifs enregistrés"
-    )
-
-    if not df_objectives.empty:
-
-        st.dataframe(
-            df_objectives,
-            use_container_width=True,
-            hide_index=True
-        )
-
-    else:
-
-        st.info(
-            "Aucun objectif enregistré."
-        )
+            st.success("✅ Enquête enregistrée.")
+            st.rerun()
 
 
 # =========================================================
 # STATISTIQUES
 # =========================================================
-
 elif menu == "📈 Statistiques":
 
-    st.header(
-        "📈 Statistiques"
-    )
+    st.header("📈 Statistiques")
 
     # -----------------------------------------------------
-    # Chargement uniquement des tables utiles
+    # KPI
     # -----------------------------------------------------
+    total_pos = len(df_pos)
 
-    df_pos = load_sheet(
-        SHEET_POS
-    )
+    total_distribution = len(df_distribution)
 
-    df_products = load_sheet(
-        SHEET_PRODUCTS
-    )
+    total_price = len(df_prices)
 
-    df_distribution = load_sheet(
-        SHEET_DISTRIBUTION
-    )
-
-    df_prices = load_sheet(
-        SHEET_PRICES
-    )
-
-    df_surveys = load_sheet(
-        SHEET_SURVEYS
-    )
-
-    df_profile = load_sheet(
-        SHEET_PROFILE
-    )
-
-    df_material_pos = load_sheet(
-        SHEET_MATERIAL_POS
-    )
-
-    df_material_control = load_sheet(
-        SHEET_MATERIAL_CONTROL
-    )
-
-    total_pos = len(
-        df_pos
-    )
-
-    total_distribution = len(
-        df_distribution
-    )
-
-    total_price = len(
-        df_prices
-    )
-
-    total_surveys = len(
-        df_surveys
-    )
-
-    total_material = len(
-        df_material_pos
-    )
+    total_surveys = len(df_surveys)
 
     total_brands = (
         df_products["Marque"].nunique()
-        if (
-            not df_products.empty
-            and "Marque"
-            in df_products.columns
-        )
+        if not df_products.empty and "Marque" in df_products.columns
         else 0
     )
 
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1, c2, c3, c4, c5 = st.columns(5)
 
-    c1.metric(
-        "POS",
-        total_pos
-    )
-
-    c2.metric(
-        "Relevés distribution",
-        total_distribution
-    )
-
-    c3.metric(
-        "Relevés prix",
-        total_price
-    )
-
-    c4.metric(
-        "Enquêtes",
-        total_surveys
-    )
-
-    c5.metric(
-        "Marques",
-        total_brands
-    )
-
-    c6.metric(
-        "Matériels",
-        total_material
-    )
+    c1.metric("POS", total_pos)
+    c2.metric("Relevés distribution", total_distribution)
+    c3.metric("Relevés prix", total_price)
+    c4.metric("Enquêtes", total_surveys)
+    c5.metric("Marques", total_brands)
 
     st.markdown("---")
 
     # -----------------------------------------------------
-    # DISTRIBUTION
+    # DISTRIBUTION PAR MARQUE
     # -----------------------------------------------------
-
     if not df_distribution.empty:
 
-        st.subheader(
-            "📦 Distribution par marque"
-        )
+        st.subheader("📦 Distribution par marque")
 
-        if (
-            "Marque"
-            in df_distribution.columns
-        ):
+        if "Marque" in df_distribution.columns:
 
             dist = df_distribution.copy()
 
             if "Quantite" in dist.columns:
-
                 dist["Quantite"] = pd.to_numeric(
                     dist["Quantite"],
                     errors="coerce"
                 ).fillna(0)
 
                 chart = (
-                    dist
-                    .groupby("Marque")["Quantite"]
+                    dist.groupby("Marque")["Quantite"]
                     .sum()
-                    .sort_values(
-                        ascending=False
-                    )
+                    .sort_values(ascending=False)
                 )
 
-                st.bar_chart(
-                    chart
-                )
+                st.bar_chart(chart)
 
-            elif "Quantité" in dist.columns:
+        st.subheader("🏷️ Distribution par catégorie")
 
-                dist["Quantité"] = pd.to_numeric(
-                    dist["Quantité"],
-                    errors="coerce"
-                ).fillna(0)
-
-                chart = (
-                    dist
-                    .groupby("Marque")["Quantité"]
-                    .sum()
-                    .sort_values(
-                        ascending=False
-                    )
-                )
-
-                st.bar_chart(
-                    chart
-                )
-
-        if (
-            "Catégorie"
-            in df_distribution.columns
-        ):
-
-            st.subheader(
-                "🏷️ Distribution par catégorie"
-            )
-
-            quantity_col = None
+        if "Catégorie" in df_distribution.columns:
 
             if "Quantite" in df_distribution.columns:
-                quantity_col = "Quantite"
-
-            elif "Quantité" in df_distribution.columns:
-                quantity_col = "Quantité"
-
-            if quantity_col:
-
-                temp_dist = df_distribution.copy()
-
-                temp_dist[quantity_col] = pd.to_numeric(
-                    temp_dist[quantity_col],
-                    errors="coerce"
-                ).fillna(0)
 
                 chart_cat = (
-                    temp_dist
-                    .groupby(
-                        "Catégorie"
-                    )[quantity_col]
+                    dist.groupby("Catégorie")["Quantite"]
                     .sum()
-                    .sort_values(
-                        ascending=False
-                    )
+                    .sort_values(ascending=False)
                 )
 
-                st.bar_chart(
-                    chart_cat
-                )
+                st.bar_chart(chart_cat)
 
     # -----------------------------------------------------
     # PRIX
     # -----------------------------------------------------
-
     if not df_prices.empty:
 
-        st.subheader(
-            "💰 Analyse des prix"
-        )
-
-        price_column = None
+        st.subheader("💰 Analyse des prix")
 
         if "Prix_Vente" in df_prices.columns:
-            price_column = "Prix_Vente"
-
-        elif "Prix" in df_prices.columns:
-            price_column = "Prix"
-
-        if price_column:
 
             price_df = df_prices.copy()
 
-            price_df[price_column] = pd.to_numeric(
-                price_df[price_column],
+            price_df["Prix_Vente"] = pd.to_numeric(
+                price_df["Prix_Vente"],
                 errors="coerce"
             )
 
             if "Marque" in price_df.columns:
 
                 avg_price = (
-                    price_df
-                    .groupby("Marque")[
-                        price_column
-                    ]
+                    price_df.groupby("Marque")["Prix_Vente"]
                     .mean()
-                    .sort_values(
-                        ascending=False
-                    )
+                    .sort_values(ascending=False)
                 )
 
-                st.bar_chart(
-                    avg_price
-                )
+                st.bar_chart(avg_price)
 
-                price_summary = (
-                    price_df
-                    .groupby("Marque")
-                    .agg(
-                        Prix_Moyen=(
-                            price_column,
-                            "mean"
-                        ),
-                        Prix_Min=(
-                            price_column,
-                            "min"
-                        ),
-                        Prix_Max=(
-                            price_column,
-                            "max"
-                        ),
-                        Nb_Releves=(
-                            price_column,
-                            "count"
-                        )
-                    )
-                    .reset_index()
-                    .sort_values(
-                        "Prix_Moyen",
-                        ascending=False
-                    )
+        if all(
+            c in price_df.columns
+            for c in ["Marque", "Prix_Vente"]
+        ):
+            price_summary = (
+                price_df.groupby("Marque")
+                .agg(
+                    Prix_Moyen=("Prix_Vente", "mean"),
+                    Prix_Min=("Prix_Vente", "min"),
+                    Prix_Max=("Prix_Vente", "max"),
+                    Nb_Releves=("Prix_Vente", "count")
                 )
+                .reset_index()
+                .sort_values("Prix_Moyen", ascending=False)
+            )
 
-                st.dataframe(
-                    price_summary,
-                    use_container_width=True,
-                    hide_index=True
-                )
+            st.dataframe(
+                price_summary,
+                use_container_width=True,
+                hide_index=True
+            )
 
     # -----------------------------------------------------
     # ENQUETES
     # -----------------------------------------------------
-
     if not df_surveys.empty:
 
-        st.subheader(
-            "📝 Résultats des enquêtes"
-        )
+        st.subheader("📝 Résultats des enquêtes")
 
-        if (
-            "Marque"
-            in df_surveys.columns
-        ):
+        if "Marque" in df_surveys.columns:
 
             survey_brand = (
                 df_surveys["Marque"]
@@ -3665,174 +1152,79 @@ elif menu == "📈 Statistiques":
                 .value_counts()
             )
 
-            st.bar_chart(
-                survey_brand
-            )
+            st.bar_chart(survey_brand)
 
-        freq_column = None
-
-        if (
-            "Frequence_Vente_Jour"
-            in df_surveys.columns
-        ):
-
-            freq_column = (
-                "Frequence_Vente_Jour"
-            )
-
-        elif (
-            "Fréquence_Vente_Jour"
-            in df_surveys.columns
-        ):
-
-            freq_column = (
-                "Fréquence_Vente_Jour"
-            )
-
-        if freq_column:
+        if "Frequence_Vente_Jour" in df_surveys.columns:
 
             freq_df = df_surveys.copy()
 
-            freq_df[freq_column] = pd.to_numeric(
-                freq_df[freq_column],
+            freq_df["Frequence_Vente_Jour"] = pd.to_numeric(
+                freq_df["Frequence_Vente_Jour"],
                 errors="coerce"
             )
 
             if "Marque" in freq_df.columns:
 
                 avg_freq = (
-                    freq_df
-                    .groupby("Marque")[
-                        freq_column
+                    freq_df.groupby("Marque")[
+                        "Frequence_Vente_Jour"
                     ]
                     .mean()
-                    .sort_values(
-                        ascending=False
-                    )
+                    .sort_values(ascending=False)
                 )
 
-                st.subheader(
-                    "📊 Fréquence moyenne "
-                    "de vente / jour"
-                )
-
-                st.bar_chart(
-                    avg_freq
-                )
+                st.subheader("📊 Fréquence moyenne de vente / jour")
+                st.bar_chart(avg_freq)
 
     # -----------------------------------------------------
     # TABLES
     # -----------------------------------------------------
-
     st.markdown("---")
+    st.subheader("📋 Données disponibles")
 
-    st.subheader(
-        "📋 Données disponibles"
-    )
-
-    tabs = st.tabs(
-        [
-            "Distribution",
-            "Prix",
-            "Enquêtes",
-            "Profils",
-            "Matériels",
-            "Contrôles"
-        ]
-    )
+    tabs = st.tabs([
+        "Distribution",
+        "Prix",
+        "Enquêtes",
+        "Profils"
+    ])
 
     with tabs[0]:
-
         if not df_distribution.empty:
-
             st.dataframe(
                 df_distribution,
                 use_container_width=True,
                 hide_index=True
             )
-
         else:
-
-            st.info(
-                "Aucune donnée."
-            )
+            st.info("Aucune donnée.")
 
     with tabs[1]:
-
         if not df_prices.empty:
-
             st.dataframe(
                 df_prices,
                 use_container_width=True,
                 hide_index=True
             )
-
         else:
-
-            st.info(
-                "Aucune donnée."
-            )
+            st.info("Aucune donnée.")
 
     with tabs[2]:
-
         if not df_surveys.empty:
-
             st.dataframe(
                 df_surveys,
                 use_container_width=True,
                 hide_index=True
             )
-
         else:
-
-            st.info(
-                "Aucune donnée."
-            )
+            st.info("Aucune donnée.")
 
     with tabs[3]:
-
         if not df_profile.empty:
-
             st.dataframe(
                 df_profile,
                 use_container_width=True,
                 hide_index=True
             )
-
         else:
-
-            st.info(
-                "Aucune donnée."
-            )
-
-    with tabs[4]:
-
-        if not df_material_pos.empty:
-
-            st.dataframe(
-                df_material_pos,
-                use_container_width=True,
-                hide_index=True
-            )
-
-        else:
-
-            st.info(
-                "Aucune donnée."
-            )
-
-    with tabs[5]:
-
-        if not df_material_control.empty:
-
-            st.dataframe(
-                df_material_control,
-                use_container_width=True,
-                hide_index=True
-            )
-
-        else:
-
-            st.info(
-                "Aucune donnée."
-            )
+            st.info("Aucune donnée.")
