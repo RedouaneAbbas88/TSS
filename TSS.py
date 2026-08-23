@@ -2,6 +2,10 @@ import streamlit as st
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
+from googleapiclient.errors import HttpError
+import io
 import uuid
 import time
 from datetime import datetime
@@ -63,6 +67,7 @@ SHEET_OBJECTIVES = "Objectifs_POS"
 SHEET_MATERIAL_TYPES = "Types_Materiel"
 SHEET_MATERIAL_POS = "Materiel_POS"
 SHEET_MATERIAL_CONTROL = "Controle_Materiel"
+DRIVE_MATERIAL_FOLDER = "Data_Info_Materiel"
 
 
 # =========================================================
@@ -141,6 +146,122 @@ def get_ws(sheet_name):
             )
 
         st.stop()
+
+
+# =========================================================
+# GOOGLE DRIVE - PHOTOS DU MATERIEL
+# =========================================================
+
+@st.cache_resource
+def get_drive_service():
+    creds = Credentials.from_service_account_info(
+        st.secrets["google"],
+        scopes=SCOPES
+    )
+    return build(
+        "drive",
+        "v3",
+        credentials=creds,
+        cache_discovery=False
+    )
+
+
+def get_or_create_drive_folder():
+    """Retourne l'ID du dossier Google Drive utilisé pour les photos."""
+    service = get_drive_service()
+
+    response = service.files().list(
+        q=(
+            f"name = '{DRIVE_MATERIAL_FOLDER}' "
+            "and mimeType = 'application/vnd.google-apps.folder' "
+            "and trashed = false"
+        ),
+        spaces="drive",
+        fields="files(id,name)",
+        pageSize=1
+    ).execute()
+
+    files = response.get("files", [])
+    if files:
+        return files[0]["id"]
+
+    metadata = {
+        "name": DRIVE_MATERIAL_FOLDER,
+        "mimeType": "application/vnd.google-apps.folder"
+    }
+
+    folder = service.files().create(
+        body=metadata,
+        fields="id"
+    ).execute()
+
+    return folder["id"]
+
+
+def upload_photo_to_drive(uploaded_file, prefix="materiel"):
+    """Upload une photo dans Google Drive et retourne son lien."""
+    if uploaded_file is None:
+        return ""
+
+    try:
+        service = get_drive_service()
+        folder_id = get_or_create_drive_folder()
+
+        extension = "jpg"
+        original_name = clean_text(uploaded_file.name)
+        if "." in original_name:
+            extension = original_name.rsplit(".", 1)[-1].lower()
+            if extension not in ["jpg", "jpeg", "png"]:
+                extension = "jpg"
+
+        filename = (
+            f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_"
+            f"{uuid.uuid4().hex[:8]}.{extension}"
+        )
+
+        file_bytes = uploaded_file.getvalue()
+        media = MediaIoBaseUpload(
+            io.BytesIO(file_bytes),
+            mimetype=uploaded_file.type or "image/jpeg",
+            resumable=False
+        )
+
+        metadata = {
+            "name": filename,
+            "parents": [folder_id]
+        }
+
+        created = service.files().create(
+            body=metadata,
+            media_body=media,
+            fields="id,name,webViewLink"
+        ).execute()
+
+        file_id = created["id"]
+
+        # Rend le fichier accessible par lien.
+        # Si la politique Google Workspace interdit le partage public,
+        # on conserve quand même le lien Drive normal.
+        try:
+            service.permissions().create(
+                fileId=file_id,
+                body={"type": "anyone", "role": "reader"},
+                fields="id"
+            ).execute()
+        except HttpError:
+            pass
+
+        return created.get(
+            "webViewLink",
+            f"https://drive.google.com/file/d/{file_id}/view"
+        )
+
+    except Exception as e:
+        st.error(
+            "❌ Impossible d'envoyer la photo vers Google Drive : "
+            f"{e}"
+        )
+        return ""
 
 
 # =========================================================
@@ -2574,6 +2695,21 @@ elif menu == "🧰 Matériel POS":
 
                 else:
 
+                    photo_url = ""
+                    if photo is not None:
+                        with st.spinner("📤 Envoi de la photo vers Google Drive..."):
+                            photo_url = upload_photo_to_drive(
+                                photo,
+                                prefix="materiel"
+                            )
+
+                        if not photo_url:
+                            st.error(
+                                "❌ La photo n'a pas pu être enregistrée. "
+                                "Le matériel n'a pas été ajouté."
+                            )
+                            st.stop()
+
                     success = append_dict_row(
                         SHEET_MATERIAL_POS,
                         {
@@ -2619,9 +2755,7 @@ elif menu == "🧰 Matériel POS":
                             "Emplacement":
                                 emplacement,
                             "Photo":
-                                photo.name
-                                if photo
-                                else "",
+                                photo_url,
                             "Observation":
                                 observation,
                             "ID_User":
@@ -2822,6 +2956,21 @@ elif menu == "🧰 Matériel POS":
                         key="save_control"
                     ):
 
+                        photo_control_url = ""
+                        if photo_c is not None:
+                            with st.spinner("📤 Envoi de la photo du contrôle vers Google Drive..."):
+                                photo_control_url = upload_photo_to_drive(
+                                    photo_c,
+                                    prefix="controle_materiel"
+                                )
+
+                            if not photo_control_url:
+                                st.error(
+                                    "❌ La photo du contrôle n'a pas pu être enregistrée. "
+                                    "Le contrôle n'a pas été enregistré."
+                                )
+                                st.stop()
+
                         success = append_dict_row(
                             SHEET_MATERIAL_CONTROL,
                             {
@@ -2854,9 +3003,7 @@ elif menu == "🧰 Matériel POS":
                                 "Produit_Marque_Presente":
                                     conform == "Oui",
                                 "Photo":
-                                    photo_c.name
-                                    if photo_c
-                                    else "",
+                                    photo_control_url,
                                 "Observation":
                                     obs_c,
                                 "Action_Necessaire":
