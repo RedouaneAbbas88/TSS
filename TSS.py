@@ -800,59 +800,67 @@ def logout():
     st.rerun()
 
 
-def get_user_planned_pos(df_visits, visit_date, user_id):
-    """Retourne uniquement les ID_POS planifiés pour cet utilisateur à cette date."""
+def normalize_visit_type(value):
+    """Normalise le type d'activité stocké dans Visites_POS."""
+    value = clean_text(value).strip().upper()
+    if value in ("DN", "DISTRIBUTION NUMERIQUE", "DISTRIBUTION NUMÉRIQUE"):
+        return "DN"
+    if value in ("PRIX", "RELEVE PRIX", "RELEVÉ PRIX", "RELEVE DES PRIX", "RELEVÉ DES PRIX"):
+        return "PRIX"
+    return ""  # Anciennes affectations sans Type_Visite : compatibilité historique.
+
+
+def visit_type_label(value):
+    return "Distribution numérique" if normalize_visit_type(value) == "DN" else "Relevé des prix"
+
+
+def get_user_planned_pos(df_visits, visit_date, user_id, visit_type):
+    """Retourne les POS planifiés pour un utilisateur, une date et une activité."""
     if df_visits is None or df_visits.empty:
         return []
-
     required = {"ID_POS", "ID_User"}
     if not required.issubset(set(df_visits.columns)):
         return []
-
-    date_column = None
-    for candidate in ("Date_Visite", "Date"):
-        if candidate in df_visits.columns:
-            date_column = candidate
-            break
-
+    date_column = next((c for c in ("Date_Visite", "Date") if c in df_visits.columns), None)
     if date_column is None:
         return []
-
     visits = df_visits.copy()
     visits["ID_User"] = visits["ID_User"].apply(clean_text)
     visits["ID_POS"] = visits["ID_POS"].apply(clean_text)
-    visits["_date_filter"] = pd.to_datetime(
-        visits[date_column], errors="coerce", dayfirst=True
-    ).dt.date
-
-    target_user = clean_text(user_id)
+    visits["_date_filter"] = pd.to_datetime(visits[date_column], errors="coerce", dayfirst=True).dt.date
+    target_type = normalize_visit_type(visit_type)
+    if "Type_Visite" in visits.columns:
+        visits["_type_filter"] = visits["Type_Visite"].apply(normalize_visit_type)
+        # Les anciennes lignes sans type restent visibles dans les deux modules.
+        type_mask = visits["_type_filter"].isin([target_type, ""])
+    else:
+        type_mask = pd.Series(True, index=visits.index)
     filtered = visits[
-        (visits["ID_User"] == target_user)
+        (visits["ID_User"] == clean_text(user_id))
         & (visits["_date_filter"] == visit_date)
         & (visits["ID_POS"] != "")
+        & type_mask
     ]
-
     return sorted(filtered["ID_POS"].drop_duplicates().tolist())
 
 
-def build_planned_pos_table(
-    df_pos, planned_pos_ids, df_visits=None, user_id=None, visit_date=None
-):
-    """Construit le planning personnel avec le statut de chaque tournée."""
+def build_planned_pos_table(df_pos, planned_pos_ids, df_visits=None, user_id=None, visit_date=None, visit_type="DN"):
+    """Construit le planning personnel d'une activité avec son statut propre."""
+    empty_cols = ["ID_POS", "Nom_POS", "Type visite", "Statut", "Début", "Fin"]
     if df_pos is None or df_pos.empty or not planned_pos_ids:
-        return pd.DataFrame(columns=["ID_POS", "Nom_POS", "Statut visite"])
-
+        return pd.DataFrame(columns=empty_cols)
     pos = df_pos.copy()
     if "ID_POS" not in pos.columns:
         planned = pd.DataFrame({"ID_POS": planned_pos_ids})
     else:
         pos["ID_POS"] = pos["ID_POS"].apply(clean_text)
         planned = pos[pos["ID_POS"].isin(planned_pos_ids)].drop_duplicates(subset=["ID_POS"]).copy()
-
     if "Nom_POS" not in planned.columns:
-        planned["Nom_POS"] = planned.get("Nom", "")
-
-    status_rows = []
+        planned["Nom_POS"] = planned["Nom"] if "Nom" in planned.columns else ""
+    planned["Type visite"] = visit_type_label(visit_type)
+    planned["Statut"] = "Planifiée"
+    planned["Début"] = ""
+    planned["Fin"] = ""
     if df_visits is not None and not df_visits.empty:
         date_col = next((c for c in ("Date_Visite", "Date") if c in df_visits.columns), None)
         if date_col and {"ID_POS", "ID_User"}.issubset(df_visits.columns):
@@ -860,39 +868,18 @@ def build_planned_pos_table(
             v["ID_POS"] = v["ID_POS"].apply(clean_text)
             v["ID_User"] = v["ID_User"].apply(clean_text)
             v["_visit_date"] = pd.to_datetime(v[date_col], errors="coerce", dayfirst=True).dt.date
+            if "Type_Visite" in v.columns:
+                v["_type"] = v["Type_Visite"].apply(normalize_visit_type)
+                v = v[v["_type"].isin([normalize_visit_type(visit_type), ""])]
             v = v[(v["ID_POS"].isin(planned_pos_ids)) & (v["ID_User"] == clean_text(user_id))]
             if visit_date is not None:
                 v = v[v["_visit_date"] == visit_date]
-            for _, row in v.iterrows():
-                status_rows.append({
-                    "ID_POS": clean_text(row.get("ID_POS", "")),
-                    "Statut visite": clean_text(row.get("Statut_Tournee", "")) or "Planifiée",
-                    "Début tournée": clean_text(row.get("Heure_Debut", "")),
-                    "Fin tournée": clean_text(row.get("Heure_Fin", "")),
-                })
-
-    status_df = pd.DataFrame(status_rows)
-    if not status_df.empty:
-        status_df = status_df.drop_duplicates(subset=["ID_POS"], keep="last")
-        planned = planned.merge(status_df, on="ID_POS", how="left")
-    else:
-        planned["Statut visite"] = "Planifiée"
-        planned["Début tournée"] = ""
-        planned["Fin tournée"] = ""
-
-    planned["Statut visite"] = planned["Statut visite"].fillna("Planifiée").replace("", "Planifiée")
-    # Tableau de planning simplifié : ne pas afficher les informations
-    # géographiques/adresse (Wilaya, Commune, Adresse).
-    preferred_columns = [
-        "ID_POS", "Nom_POS", "Nom",
-        "Statut visite", "Début tournée", "Fin tournée"
-    ]
-    display_columns = [column for column in preferred_columns if column in planned.columns]
-    if "Nom_POS" in display_columns and "Nom" in display_columns:
-        display_columns.remove("Nom")
-    if not display_columns:
-        display_columns = ["ID_POS", "Statut visite"]
-    return planned[display_columns].reset_index(drop=True)
+            for _, row in v.drop_duplicates(subset=["ID_POS"], keep="last").iterrows():
+                mask = planned["ID_POS"] == clean_text(row.get("ID_POS", ""))
+                planned.loc[mask, "Statut"] = clean_text(row.get("Statut_Tournee", "")) or "Planifiée"
+                planned.loc[mask, "Début"] = clean_text(row.get("Heure_Debut", ""))
+                planned.loc[mask, "Fin"] = clean_text(row.get("Heure_Fin", ""))
+    return planned[empty_cols].reset_index(drop=True)
 
 
 def _column_letter(column_number):
@@ -904,8 +891,26 @@ def _column_letter(column_number):
     return result
 
 
-def get_planned_visit_row(df_visits, pos_id, visit_date, user_id):
-    """Retourne le numéro de ligne Sheets et l'affectation de visite correspondante."""
+def ensure_sheet_columns(sheet_name, required_columns):
+    """Ajoute à droite les colonnes manquantes sans modifier les données existantes."""
+    headers = load_sheet_headers(sheet_name)
+    missing = [column for column in required_columns if column not in headers]
+    if not missing:
+        return headers
+    start_col = len(headers) + 1
+    ws = get_ws(sheet_name)
+    ws.update(
+        f"{_column_letter(start_col)}1:{_column_letter(start_col + len(missing) - 1)}1",
+        [missing],
+        value_input_option="USER_ENTERED"
+    )
+    load_sheet_headers.clear(sheet_name)
+    clear_sheet_cache(sheet_name)
+    return headers + missing
+
+
+def get_planned_visit_row(df_visits, pos_id, visit_date, user_id, visit_type):
+    """Retourne la ligne Sheets correspondant au POS, utilisateur, date et activité."""
     if df_visits is None or df_visits.empty:
         return None, None
     date_col = next((c for c in ("Date_Visite", "Date") if c in df_visits.columns), None)
@@ -915,45 +920,48 @@ def get_planned_visit_row(df_visits, pos_id, visit_date, user_id):
     v["_pos"] = v["ID_POS"].apply(clean_text)
     v["_user"] = v["ID_User"].apply(clean_text)
     v["_date"] = pd.to_datetime(v[date_col], errors="coerce", dayfirst=True).dt.date
+    if "Type_Visite" in v.columns:
+        v["_type"] = v["Type_Visite"].apply(normalize_visit_type)
+        v = v[v["_type"].isin([normalize_visit_type(visit_type), ""])]
     matches = v[(v["_pos"] == clean_text(pos_id)) &
                 (v["_user"] == clean_text(user_id)) &
                 (v["_date"] == visit_date)]
     if matches.empty:
         return None, None
-    # DataFrame index 0 correspond à la ligne 2 de Google Sheets (ligne 1 = en-têtes).
+    # Si plusieurs lignes existent, privilégier la ligne du type exact.
+    if "Type_Visite" in matches.columns:
+        exact = matches[matches["_type"] == normalize_visit_type(visit_type)]
+        if not exact.empty:
+            matches = exact
     idx = matches.index[-1]
     return int(idx) + 2, matches.iloc[-1]
 
 
-def update_visit_tournee(df_visits, pos_id, visit_date, user_id, values):
-    """Met à jour le statut de tournée sur la ligne Visites_POS sans réécrire toute la feuille."""
-    row_number, visit_row = get_planned_visit_row(df_visits, pos_id, visit_date, user_id)
+def update_visit_tournee(df_visits, pos_id, visit_date, user_id, visit_type, values):
+    """Met à jour le suivi de tournée sur la ligne de l'activité concernée."""
+    row_number, visit_row = get_planned_visit_row(df_visits, pos_id, visit_date, user_id, visit_type)
     if row_number is None:
-        st.error("Affectation introuvable dans Visites_POS. Actualisez le planning ou contactez l'administrateur.")
+        st.error("Affectation introuvable pour cette activité dans Visites_POS. Actualisez le planning ou contactez l'administrateur.")
         return False
     try:
         required_columns = ["Statut_Tournee", "Heure_Debut", "Heure_Fin", "Motif_Cloture", "Observation_Cloture"]
         headers = load_sheet_headers(SHEET_VISITS)
         missing = [column for column in required_columns if column not in headers]
         if missing:
-            # Ajoute les colonnes de suivi à droite de la feuille en une seule écriture.
             start_col = len(headers) + 1
             ws = get_ws(SHEET_VISITS)
             ws.update(
                 f"{_column_letter(start_col)}1:{_column_letter(start_col + len(missing) - 1)}1",
-                [missing],
-                value_input_option="USER_ENTERED"
+                [missing], value_input_option="USER_ENTERED"
             )
             headers = headers + missing
             load_sheet_headers.clear(SHEET_VISITS)
-
         ws = get_ws(SHEET_VISITS)
         updates = []
         for column_name, value in values.items():
             if column_name in headers:
                 col_number = headers.index(column_name) + 1
-                cell = f"{_column_letter(col_number)}{row_number}"
-                updates.append({"range": cell, "values": [[value]]})
+                updates.append({"range": f"{_column_letter(col_number)}{row_number}", "values": [[value]]})
         if updates:
             ws.batch_update(updates, value_input_option="USER_ENTERED")
         clear_sheet_cache(SHEET_VISITS)
@@ -963,38 +971,36 @@ def update_visit_tournee(df_visits, pos_id, visit_date, user_id, values):
         return False
 
 
-def render_visit_tournee(df_visits, selected_pos, visit_date, user_id, key_prefix):
-    """Démarre/ferme la tournée d'un POS. Retourne True uniquement si elle est en cours."""
+def render_visit_tournee(df_visits, selected_pos, visit_date, user_id, key_prefix, visit_type):
+    """Démarre/ferme la tournée d'un POS pour une activité donnée."""
     if not selected_pos or selected_pos == "--- Sélectionner ---":
-        st.info("Sélectionnez un POS dans votre planning pour démarrer sa tournée.")
+        st.info("Sélectionnez un POS dans votre planning pour démarrer cette activité.")
         return False
-
-    row_number, visit_row = get_planned_visit_row(df_visits, selected_pos, visit_date, user_id)
+    row_number, visit_row = get_planned_visit_row(df_visits, selected_pos, visit_date, user_id, visit_type)
     if row_number is None:
-        st.error("Ce POS ne correspond pas à une affectation de votre planning pour cette date.")
+        st.error("Ce POS ne correspond pas à une affectation de votre planning pour cette activité et cette date.")
         return False
-
+    activity_label = visit_type_label(visit_type)
     status = clean_text(visit_row.get("Statut_Tournee", "")) or "Planifiée"
-    st.markdown("#### 🚗 Suivi de la tournée")
+    st.markdown(f"#### 🚗 Tournée — {activity_label}")
     if status.lower() in ("planifiée", "planifiee", "planifie", ""):
-        st.info("Cette visite est planifiée, mais la tournée n'a pas encore commencé.")
+        st.info("Cette activité est planifiée, mais la tournée n'a pas encore commencé.")
         if st.button("▶️ Démarrer la tournée", key=f"{key_prefix}_start_tournee", use_container_width=True):
             now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            if update_visit_tournee(df_visits, selected_pos, visit_date, user_id, {
+            if update_visit_tournee(df_visits, selected_pos, visit_date, user_id, visit_type, {
                 "Statut_Tournee": "En cours", "Heure_Debut": now_text,
                 "Heure_Fin": "", "Motif_Cloture": "", "Observation_Cloture": ""
             }):
-                st.success("Tournée démarrée. Vous pouvez maintenant saisir plusieurs produits pour ce POS.")
+                st.success("Tournée démarrée. Vous pouvez maintenant effectuer plusieurs saisies pour cette activité.")
                 st.rerun()
         return False
-
     if status.lower() in ("en cours", "en_cours", "encours"):
         started = clean_text(visit_row.get("Heure_Debut", ""))
-        st.success(f"Tournée en cours{(' depuis ' + started) if started else ''}. Vous pouvez enregistrer plusieurs produits.")
+        st.success(f"Tournée en cours{(' depuis ' + started) if started else ''}. Vous pouvez effectuer plusieurs saisies.")
         with st.form(f"{key_prefix}_close_tournee_form"):
             outcome = st.selectbox(
-                "Résultat de la visite",
-                ["Visite effectuée", "POS fermé", "Responsable absent", "Refus d'accès", "Autre"],
+                "Résultat de l'activité",
+                ["Visite effectuée", "POS fermé", "Responsable absent", "Refus d'accès", "Visite reportée", "Autre"],
                 key=f"{key_prefix}_close_outcome"
             )
             close_observation = st.text_area("Observation de clôture (facultatif)", key=f"{key_prefix}_close_observation")
@@ -1002,15 +1008,14 @@ def render_visit_tournee(df_visits, selected_pos, visit_date, user_id, key_prefi
         if close_clicked:
             final_status = "Visitée" if outcome == "Visite effectuée" else outcome
             now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            if update_visit_tournee(df_visits, selected_pos, visit_date, user_id, {
+            if update_visit_tournee(df_visits, selected_pos, visit_date, user_id, visit_type, {
                 "Statut_Tournee": final_status, "Heure_Fin": now_text,
                 "Motif_Cloture": outcome, "Observation_Cloture": close_observation
             }):
-                st.success(f"Tournée clôturée : {final_status}.")
+                st.success(f"Activité clôturée : {final_status}.")
                 st.rerun()
         return True
-
-    st.warning(f"Cette tournée est déjà clôturée : **{status}**.")
+    st.warning(f"Cette activité est déjà clôturée : **{status}**.")
     return False
 
 
@@ -1372,7 +1377,8 @@ elif menu == "📦 Distribution Numérique":
     pos_names = get_user_planned_pos(
         df_visits_distribution,
         date_visite,
-        st.session_state.user_id
+        st.session_state.user_id,
+        "DN"
     )
 
     if not pos_names:
@@ -1390,7 +1396,7 @@ elif menu == "📦 Distribution Numérique":
     st.dataframe(
         build_planned_pos_table(
             df_pos, pos_names, df_visits_distribution,
-            st.session_state.user_id, date_visite
+            st.session_state.user_id, date_visite, "DN"
         ),
         use_container_width=True,
         hide_index=True
@@ -1407,7 +1413,7 @@ elif menu == "📦 Distribution Numérique":
 
     distribution_tournee_open = render_visit_tournee(
         df_visits_distribution, selected_pos, date_visite,
-        st.session_state.user_id, "distribution"
+        st.session_state.user_id, "distribution", "DN"
     )
     if not distribution_tournee_open:
         st.info("Démarrez la tournée du POS sélectionné pour commencer la saisie. Une fois démarrée, vous pourrez enregistrer plusieurs produits avant de la clôturer.")
@@ -2437,7 +2443,8 @@ elif menu == "💰 Relevé Prix":
     pos_names = get_user_planned_pos(
         df_visits_price,
         date_releve,
-        st.session_state.user_id
+        st.session_state.user_id,
+        "PRIX"
     )
 
     if not pos_names:
@@ -2455,7 +2462,7 @@ elif menu == "💰 Relevé Prix":
     st.dataframe(
         build_planned_pos_table(
             df_pos, pos_names, df_visits_price,
-            st.session_state.user_id, date_releve
+            st.session_state.user_id, date_releve, "PRIX"
         ),
         use_container_width=True,
         hide_index=True
@@ -2472,7 +2479,7 @@ elif menu == "💰 Relevé Prix":
 
     price_tournee_open = render_visit_tournee(
         df_visits_price, pos, date_releve,
-        st.session_state.user_id, "price"
+        st.session_state.user_id, "price", "PRIX"
     )
     if not price_tournee_open:
         st.info("Démarrez la tournée du POS sélectionné pour commencer la saisie. Vous pourrez enregistrer plusieurs relevés avant de la clôturer.")
@@ -3428,13 +3435,13 @@ elif menu == "🧰 Matériel POS":
 
 elif menu == "⚙️ Paramétrage des visites":
 
-    # Sécurité supplémentaire : cette page n'est accessible qu'au rôle admin.
+    # Sécurité : page réservée aux administrateurs.
     if clean_text(st.session_state.role).lower() not in ("admin", "administrateur", "administrator"):
         st.error("Accès réservé à l'administrateur.")
         st.stop()
 
     st.header("⚙️ Paramétrage des visites")
-    st.caption("Affectez chaque POS à un utilisateur et à une date de visite.")
+    st.caption("Planifiez séparément la Distribution numérique et le Relevé des prix. Un POS peut être affecté aux deux activités le même jour.")
 
     df_pos_admin = load_sheet(SHEET_POS)
     df_users_admin = load_sheet(SHEET_USERS)
@@ -3443,7 +3450,6 @@ elif menu == "⚙️ Paramétrage des visites":
     if df_pos_admin.empty or "ID_POS" not in df_pos_admin.columns:
         st.warning("La feuille POS doit contenir la colonne ID_POS et des POS enregistrés.")
         st.stop()
-
     if df_users_admin.empty or not {"ID_User", "Nom"}.issubset(df_users_admin.columns):
         st.warning("La feuille Utilisateurs doit contenir les colonnes ID_User et Nom.")
         st.stop()
@@ -3451,14 +3457,12 @@ elif menu == "⚙️ Paramétrage des visites":
     pos_admin = df_pos_admin.copy()
     pos_admin["ID_POS"] = pos_admin["ID_POS"].apply(clean_text)
     pos_admin = pos_admin[pos_admin["ID_POS"] != ""].drop_duplicates(subset=["ID_POS"])
-
     users_admin = df_users_admin.copy()
     users_admin["ID_User"] = users_admin["ID_User"].apply(clean_text)
     users_admin["Nom"] = users_admin["Nom"].apply(clean_text)
     if "Statut" in users_admin.columns:
         users_admin = users_admin[users_admin["Statut"].apply(clean_text).str.lower() != "inactif"]
-    users_admin = users_admin[(users_admin["ID_User"] != "") & (users_admin["Nom"] != "")]
-    users_admin = users_admin.drop_duplicates(subset=["ID_User"])
+    users_admin = users_admin[(users_admin["ID_User"] != "") & (users_admin["Nom"] != "")].drop_duplicates(subset=["ID_User"])
 
     if pos_admin.empty or users_admin.empty:
         st.warning("Aucun POS ou utilisateur actif disponible pour le paramétrage.")
@@ -3469,10 +3473,7 @@ elif menu == "⚙️ Paramétrage des visites":
         return f"{row['ID_POS']} - {name}" if name else row["ID_POS"]
 
     pos_options = {pos_label(row): row["ID_POS"] for _, row in pos_admin.iterrows()}
-    user_options = {
-        f"{row['Nom']} ({row['ID_User']})": row["ID_User"]
-        for _, row in users_admin.iterrows()
-    }
+    user_options = {f"{row['Nom']} ({row['ID_User']})": row["ID_User"] for _, row in users_admin.iterrows()}
 
     tab_add_plan, tab_view_plan = st.tabs(["➕ Nouvelle affectation", "📅 Planning des visites"])
 
@@ -3484,46 +3485,87 @@ elif menu == "⚙️ Paramétrage des visites":
                 selected_user_label = st.selectbox("Utilisateur responsable", list(user_options.keys()))
             with c2:
                 planned_date = st.date_input("Date prévue de visite", value=datetime.now().date(), key="admin_planned_visit_date")
-
+                selected_types = st.multiselect(
+                    "Activité(s) à réaliser",
+                    options=["DN", "PRIX"],
+                    default=["DN", "PRIX"],
+                    format_func=lambda x: "Distribution numérique" if x == "DN" else "Relevé des prix"
+                )
             save_assignment = st.form_submit_button("💾 Enregistrer l'affectation", use_container_width=True)
 
         if save_assignment:
             selected_pos_id = pos_options[selected_pos_label]
             selected_user_id = user_options[selected_user_label]
-
-            existing = df_visits_admin.copy()
-            duplicate = False
-            if not existing.empty and {"ID_POS", "ID_User"}.issubset(existing.columns):
-                date_col = "Date_Visite" if "Date_Visite" in existing.columns else ("Date" if "Date" in existing.columns else None)
-                if date_col:
-                    existing["_pos"] = existing["ID_POS"].apply(clean_text)
-                    existing["_user"] = existing["ID_User"].apply(clean_text)
-                    existing["_date"] = pd.to_datetime(existing[date_col], errors="coerce", dayfirst=True).dt.date
-                    duplicate = ((existing["_pos"] == selected_pos_id) & (existing["_user"] == selected_user_id) & (existing["_date"] == planned_date)).any()
-
-            if duplicate:
-                st.warning("Cette affectation existe déjà pour cet utilisateur, ce POS et cette date.")
+            if not selected_types:
+                st.error("Sélectionnez au moins une activité : DN et/ou Relevé des prix.")
             else:
-                assignment_id = str(uuid.uuid4())
-                success = append_dict_row(
-                    SHEET_VISITS,
-                    {
-                        "ID_Visite": assignment_id,
-                        "ID": assignment_id,
-                        "Date_Visite": str(planned_date),
-                        "Date": str(planned_date),
-                        "ID_POS": selected_pos_id,
-                        "ID_User": selected_user_id,
-                        "Motif": "Planification",
-                        "Resultat": "",
-                        "Résultat": "",
-                        "Observation": ""
-                    }
-                )
-                if success:
+                try:
+                    ensure_sheet_columns(
+                        SHEET_VISITS,
+                        [
+                            "Type_Visite", "Statut_Tournee", "Heure_Debut",
+                            "Heure_Fin", "Motif_Cloture", "Observation_Cloture"
+                        ]
+                    )
+                except Exception as exc:
+                    st.error(f"Impossible de préparer les colonnes de planning : {exc}")
+                    st.stop()
+                existing = df_visits_admin.copy()
+                date_col = "Date_Visite" if "Date_Visite" in existing.columns else ("Date" if "Date" in existing.columns else None)
+                created_types = []
+                duplicates = []
+                for activity_type in selected_types:
+                    duplicate = False
+                    if not existing.empty and date_col and {"ID_POS", "ID_User"}.issubset(existing.columns):
+                        check = existing.copy()
+                        check["_pos"] = check["ID_POS"].apply(clean_text)
+                        check["_user"] = check["ID_User"].apply(clean_text)
+                        check["_date"] = pd.to_datetime(check[date_col], errors="coerce", dayfirst=True).dt.date
+                        if "Type_Visite" in check.columns:
+                            check["_type"] = check["Type_Visite"].apply(normalize_visit_type)
+                            # Une ancienne ligne sans type est considérée comme une affectation historique générique.
+                            type_match = check["_type"].isin([activity_type, ""])
+                        else:
+                            type_match = pd.Series(True, index=check.index)
+                        duplicate = ((check["_pos"] == selected_pos_id) &
+                                     (check["_user"] == selected_user_id) &
+                                     (check["_date"] == planned_date) & type_match).any()
+                    if duplicate:
+                        duplicates.append("Distribution numérique" if activity_type == "DN" else "Relevé des prix")
+                        continue
+                    assignment_id = str(uuid.uuid4())
+                    success = append_dict_row(
+                        SHEET_VISITS,
+                        {
+                            "ID_Visite": assignment_id,
+                            "ID": assignment_id,
+                            "Date_Visite": str(planned_date),
+                            "Date": str(planned_date),
+                            "ID_POS": selected_pos_id,
+                            "ID_User": selected_user_id,
+                            "Type_Visite": activity_type,
+                            "Statut_Tournee": "Planifiée",
+                            "Heure_Debut": "",
+                            "Heure_Fin": "",
+                            "Motif_Cloture": "",
+                            "Observation_Cloture": "",
+                            "Motif": "Planification",
+                            "Resultat": "",
+                            "Résultat": "",
+                            "Observation": ""
+                        }
+                    )
+                    if success:
+                        created_types.append("Distribution numérique" if activity_type == "DN" else "Relevé des prix")
+                        # Mettre à jour le DataFrame local pour éviter un doublon dans le même formulaire.
+                        new_record = {"ID_POS": selected_pos_id, "ID_User": selected_user_id, date_col or "Date_Visite": str(planned_date), "Type_Visite": activity_type}
+                        existing = pd.concat([existing, pd.DataFrame([new_record])], ignore_index=True)
+                if created_types:
                     clear_sheet_cache(SHEET_VISITS)
-                    st.success("Affectation enregistrée. Le POS apparaîtra dans la liste de l'utilisateur à la date prévue.")
+                    st.success("Affectation(s) créée(s) : " + " et ".join(created_types) + ".")
                     st.rerun()
+                if duplicates:
+                    st.warning("Affectation déjà existante pour : " + " et ".join(duplicates) + ".")
 
     with tab_view_plan:
         if df_visits_admin.empty or not {"ID_POS", "ID_User"}.issubset(df_visits_admin.columns):
@@ -3535,19 +3577,19 @@ elif menu == "⚙️ Paramétrage des visites":
                 plan["Date prévue"] = pd.to_datetime(plan[date_col], errors="coerce", dayfirst=True).dt.date
                 plan["ID_POS"] = plan["ID_POS"].apply(clean_text)
                 plan["ID_User"] = plan["ID_User"].apply(clean_text)
-                pos_name_map = {
-                    clean_text(row["ID_POS"]): clean_text(row.get("Nom_POS", row.get("Nom", "")))
-                    for _, row in pos_admin.iterrows()
-                }
+                pos_name_map = {clean_text(row["ID_POS"]): clean_text(row.get("Nom_POS", row.get("Nom", ""))) for _, row in pos_admin.iterrows()}
                 user_name_map = dict(zip(users_admin["ID_User"], users_admin["Nom"]))
                 plan["Point de vente"] = plan["ID_POS"].map(lambda x: (x + " - " + pos_name_map[x]) if pos_name_map.get(x) else x)
                 plan["Utilisateur"] = plan["ID_User"].map(lambda x: user_name_map.get(x, x))
-                plan = plan[plan["ID_POS"] != ""].copy()
-                display_cols = [c for c in ["Date prévue", "Utilisateur", "Point de vente", "Motif", "Resultat", "Résultat"] if c in plan.columns]
+                if "Type_Visite" in plan.columns:
+                    plan["Type de visite"] = plan["Type_Visite"].apply(lambda x: visit_type_label(x) if normalize_visit_type(x) else "Ancienne affectation (type non précisé)")
+                else:
+                    plan["Type de visite"] = "Ancienne affectation (type non précisé)"
+                plan["Statut"] = plan.get("Statut_Tournee", pd.Series("Planifiée", index=plan.index)).fillna("").replace("", "Planifiée")
+                display_cols = [c for c in ["Date prévue", "Utilisateur", "Point de vente", "Type de visite", "Statut"] if c in plan.columns]
                 st.dataframe(plan[display_cols].sort_values("Date prévue", na_position="last"), use_container_width=True, hide_index=True)
             else:
                 st.warning("La feuille Visites_POS doit contenir Date_Visite ou Date pour afficher le planning.")
-
 
 elif menu == "🚗 Visites POS":
 
