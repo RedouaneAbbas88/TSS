@@ -791,6 +791,41 @@ def logout():
     st.rerun()
 
 
+def get_user_planned_pos(df_visits, visit_date, user_id):
+    """Retourne uniquement les ID_POS planifiés pour cet utilisateur à cette date."""
+    if df_visits is None or df_visits.empty:
+        return []
+
+    required = {"ID_POS", "ID_User"}
+    if not required.issubset(set(df_visits.columns)):
+        return []
+
+    date_column = None
+    for candidate in ("Date_Visite", "Date"):
+        if candidate in df_visits.columns:
+            date_column = candidate
+            break
+
+    if date_column is None:
+        return []
+
+    visits = df_visits.copy()
+    visits["ID_User"] = visits["ID_User"].apply(clean_text)
+    visits["ID_POS"] = visits["ID_POS"].apply(clean_text)
+    visits["_date_filter"] = pd.to_datetime(
+        visits[date_column], errors="coerce", dayfirst=True
+    ).dt.date
+
+    target_user = clean_text(user_id)
+    filtered = visits[
+        (visits["ID_User"] == target_user)
+        & (visits["_date_filter"] == visit_date)
+        & (visits["ID_POS"] != "")
+    ]
+
+    return sorted(filtered["ID_POS"].drop_duplicates().tolist())
+
+
 # =========================================================
 # LOGIN
 # =========================================================
@@ -1128,18 +1163,38 @@ elif menu == "📦 Distribution Numérique":
     # un produit pourra être créé directement depuis ce formulaire.
 
     # -----------------------------------------------------
-    # POS
+    # DATE ET POS PLANIFIES POUR L'UTILISATEUR CONNECTE
     # -----------------------------------------------------
 
-    pos_names = unique_sorted(
-        df_pos,
-        "ID_POS"
+    date_visite = st.date_input(
+        "Date de visite",
+        value=datetime.now().date(),
+        key="distribution_date"
     )
 
+    # Rafraîchir le planning pour éviter d'afficher une ancienne liste en cache.
+    clear_sheet_cache(SHEET_VISITS)
+    df_visits_distribution = load_sheet(SHEET_VISITS)
+
+    pos_names = get_user_planned_pos(
+        df_visits_distribution,
+        date_visite,
+        st.session_state.user_id
+    )
+
+    if not pos_names:
+        st.warning(
+            "Aucun POS n'est planifié pour votre utilisateur à cette date "
+            "dans le tableau Visites POS."
+        )
+        st.stop()
+
+    if st.session_state.get("distribution_pos") not in ["--- Sélectionner ---"] + pos_names:
+        st.session_state["distribution_pos"] = "--- Sélectionner ---"
+
     selected_pos = st.selectbox(
-        "📍 Point de vente",
-        ["--- Sélectionner ---"]
-        + pos_names,
+        "📍 Point de vente prévu pour cette visite",
+        ["--- Sélectionner ---"] + pos_names,
         key="distribution_pos"
     )
 
@@ -1173,11 +1228,7 @@ elif menu == "📦 Distribution Numérique":
 
     with col2:
 
-        date_visite = st.date_input(
-            "Date de visite",
-            value=datetime.now().date(),
-            key="distribution_date"
-        )
+        st.caption(f"Date de visite : {date_visite.strftime('%d/%m/%Y')}")
 
     remarque = st.text_area(
         "Remarque",
@@ -2159,13 +2210,35 @@ elif menu == "💰 Relevé Prix":
 
     # Le référentiel Produits peut être complété depuis ce module.
 
+    date_releve = st.date_input(
+        "Date du relevé",
+        value=datetime.now().date(),
+        key="price_date"
+    )
+
+    # Les POS proposés proviennent exclusivement du planning de l'utilisateur.
+    clear_sheet_cache(SHEET_VISITS)
+    df_visits_price = load_sheet(SHEET_VISITS)
+
+    pos_names = get_user_planned_pos(
+        df_visits_price,
+        date_releve,
+        st.session_state.user_id
+    )
+
+    if not pos_names:
+        st.warning(
+            "Aucun POS n'est planifié pour votre utilisateur à cette date "
+            "dans le tableau Visites POS."
+        )
+        st.stop()
+
+    if st.session_state.get("price_pos") not in ["--- Sélectionner ---"] + pos_names:
+        st.session_state["price_pos"] = "--- Sélectionner ---"
+
     pos = st.selectbox(
-        "POS",
-        ["--- Sélectionner ---"]
-        + unique_sorted(
-            df_pos,
-            "ID_POS"
-        ),
+        "📍 Point de vente prévu pour cette visite",
+        ["--- Sélectionner ---"] + pos_names,
         key="price_pos"
     )
 
@@ -2208,12 +2281,6 @@ elif menu == "💰 Relevé Prix":
         min_value=0.0,
         step=100.0,
         key="price_promo_value"
-    )
-
-    date_releve = st.date_input(
-        "Date du relevé",
-        value=datetime.now().date(),
-        key="price_date"
     )
 
     remarque = st.text_area(
