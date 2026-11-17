@@ -991,19 +991,25 @@ st.sidebar.write(
 
 st.sidebar.markdown("---")
 
+menu_items = [
+    "🏠 Dashboard",
+    "📦 Distribution Numérique",
+    "👤 Profil Client",
+    "💰 Relevé Prix",
+    "📝 Enquête",
+    "🧰 Matériel POS",
+    "🚗 Visites POS",
+    "🎯 Objectifs POS",
+    "📈 Statistiques"
+]
+
+# Le paramétrage du planning est réservé aux administrateurs.
+if clean_text(st.session_state.role).lower() in ("admin", "administrateur", "administrator"):
+    menu_items.insert(7, "⚙️ Paramétrage des visites")
+
 menu = st.sidebar.radio(
     "Menu",
-    [
-        "🏠 Dashboard",
-        "📦 Distribution Numérique",
-        "👤 Profil Client",
-        "💰 Relevé Prix",
-        "📝 Enquête",
-        "🧰 Matériel POS",
-        "🚗 Visites POS",
-        "🎯 Objectifs POS",
-        "📈 Statistiques"
-    ]
+    menu_items
 )
 
 if st.sidebar.button(
@@ -3189,6 +3195,130 @@ elif menu == "🧰 Matériel POS":
 # =========================================================
 # VISITES POS
 # =========================================================
+
+elif menu == "⚙️ Paramétrage des visites":
+
+    # Sécurité supplémentaire : cette page n'est accessible qu'au rôle admin.
+    if clean_text(st.session_state.role).lower() not in ("admin", "administrateur", "administrator"):
+        st.error("Accès réservé à l'administrateur.")
+        st.stop()
+
+    st.header("⚙️ Paramétrage des visites")
+    st.caption("Affectez chaque POS à un utilisateur et à une date de visite.")
+
+    df_pos_admin = load_sheet(SHEET_POS)
+    df_users_admin = load_sheet(SHEET_USERS)
+    clear_sheet_cache(SHEET_VISITS)
+    df_visits_admin = load_sheet(SHEET_VISITS)
+
+    if df_pos_admin.empty or "ID_POS" not in df_pos_admin.columns:
+        st.warning("La feuille POS doit contenir la colonne ID_POS et des POS enregistrés.")
+        st.stop()
+
+    if df_users_admin.empty or not {"ID_User", "Nom"}.issubset(df_users_admin.columns):
+        st.warning("La feuille Utilisateurs doit contenir les colonnes ID_User et Nom.")
+        st.stop()
+
+    pos_admin = df_pos_admin.copy()
+    pos_admin["ID_POS"] = pos_admin["ID_POS"].apply(clean_text)
+    pos_admin = pos_admin[pos_admin["ID_POS"] != ""].drop_duplicates(subset=["ID_POS"])
+
+    users_admin = df_users_admin.copy()
+    users_admin["ID_User"] = users_admin["ID_User"].apply(clean_text)
+    users_admin["Nom"] = users_admin["Nom"].apply(clean_text)
+    if "Statut" in users_admin.columns:
+        users_admin = users_admin[users_admin["Statut"].apply(clean_text).str.lower() != "inactif"]
+    users_admin = users_admin[(users_admin["ID_User"] != "") & (users_admin["Nom"] != "")]
+    users_admin = users_admin.drop_duplicates(subset=["ID_User"])
+
+    if pos_admin.empty or users_admin.empty:
+        st.warning("Aucun POS ou utilisateur actif disponible pour le paramétrage.")
+        st.stop()
+
+    def pos_label(row):
+        name = clean_text(row.get("Nom_POS", row.get("Nom", "")))
+        return f"{row['ID_POS']} - {name}" if name else row["ID_POS"]
+
+    pos_options = {pos_label(row): row["ID_POS"] for _, row in pos_admin.iterrows()}
+    user_options = {
+        f"{row['Nom']} ({row['ID_User']})": row["ID_User"]
+        for _, row in users_admin.iterrows()
+    }
+
+    tab_add_plan, tab_view_plan = st.tabs(["➕ Nouvelle affectation", "📅 Planning des visites"])
+
+    with tab_add_plan:
+        with st.form("admin_visit_assignment_form", clear_on_submit=False):
+            c1, c2 = st.columns(2)
+            with c1:
+                selected_pos_label = st.selectbox("Point de vente (POS)", list(pos_options.keys()))
+                selected_user_label = st.selectbox("Utilisateur responsable", list(user_options.keys()))
+            with c2:
+                planned_date = st.date_input("Date prévue de visite", value=datetime.now().date(), key="admin_planned_visit_date")
+
+            save_assignment = st.form_submit_button("💾 Enregistrer l'affectation", use_container_width=True)
+
+        if save_assignment:
+            selected_pos_id = pos_options[selected_pos_label]
+            selected_user_id = user_options[selected_user_label]
+
+            existing = df_visits_admin.copy()
+            duplicate = False
+            if not existing.empty and {"ID_POS", "ID_User"}.issubset(existing.columns):
+                date_col = "Date_Visite" if "Date_Visite" in existing.columns else ("Date" if "Date" in existing.columns else None)
+                if date_col:
+                    existing["_pos"] = existing["ID_POS"].apply(clean_text)
+                    existing["_user"] = existing["ID_User"].apply(clean_text)
+                    existing["_date"] = pd.to_datetime(existing[date_col], errors="coerce", dayfirst=True).dt.date
+                    duplicate = ((existing["_pos"] == selected_pos_id) & (existing["_user"] == selected_user_id) & (existing["_date"] == planned_date)).any()
+
+            if duplicate:
+                st.warning("Cette affectation existe déjà pour cet utilisateur, ce POS et cette date.")
+            else:
+                assignment_id = str(uuid.uuid4())
+                success = append_dict_row(
+                    SHEET_VISITS,
+                    {
+                        "ID_Visite": assignment_id,
+                        "ID": assignment_id,
+                        "Date_Visite": str(planned_date),
+                        "Date": str(planned_date),
+                        "ID_POS": selected_pos_id,
+                        "ID_User": selected_user_id,
+                        "Motif": "Planification",
+                        "Resultat": "",
+                        "Résultat": "",
+                        "Observation": ""
+                    }
+                )
+                if success:
+                    clear_sheet_cache(SHEET_VISITS)
+                    st.success("Affectation enregistrée. Le POS apparaîtra dans la liste de l'utilisateur à la date prévue.")
+                    st.rerun()
+
+    with tab_view_plan:
+        if df_visits_admin.empty or not {"ID_POS", "ID_User"}.issubset(df_visits_admin.columns):
+            st.info("Aucune affectation enregistrée pour le moment.")
+        else:
+            plan = df_visits_admin.copy()
+            date_col = "Date_Visite" if "Date_Visite" in plan.columns else ("Date" if "Date" in plan.columns else None)
+            if date_col:
+                plan["Date prévue"] = pd.to_datetime(plan[date_col], errors="coerce", dayfirst=True).dt.date
+                plan["ID_POS"] = plan["ID_POS"].apply(clean_text)
+                plan["ID_User"] = plan["ID_User"].apply(clean_text)
+                pos_name_map = {
+                    clean_text(row["ID_POS"]): clean_text(row.get("Nom_POS", row.get("Nom", "")))
+                    for _, row in pos_admin.iterrows()
+                }
+                user_name_map = dict(zip(users_admin["ID_User"], users_admin["Nom"]))
+                plan["Point de vente"] = plan["ID_POS"].map(lambda x: (x + " - " + pos_name_map[x]) if pos_name_map.get(x) else x)
+                plan["Utilisateur"] = plan["ID_User"].map(lambda x: user_name_map.get(x, x))
+                plan = plan[plan["ID_POS"] != ""].copy()
+                display_cols = [c for c in ["Date prévue", "Utilisateur", "Point de vente", "Motif", "Resultat", "Résultat"] if c in plan.columns]
+                st.dataframe(plan[display_cols].sort_values("Date prévue", na_position="last"), use_container_width=True, hide_index=True)
+            else:
+                st.warning("La feuille Visites_POS doit contenir Date_Visite ou Date pour afficher le planning.")
+
 
 elif menu == "🚗 Visites POS":
 
