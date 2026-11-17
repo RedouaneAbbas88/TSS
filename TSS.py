@@ -530,176 +530,215 @@ def filter_products(
 
 
 # =========================================================
-# CASCADE PRODUITS
+# CASCADE PRODUITS + AJOUT D'UN NOUVEAU PRODUIT
 # =========================================================
+
+PLACEHOLDER = "--- Sélectionner ---"
+
 
 def product_cascade(
     df_products,
-    prefix="product"
+    prefix="product",
+    allow_add=False
 ):
+    """Sélection en cascade avec possibilité d'ajouter un produit.
 
-    if df_products.empty:
+    La feuille Produits doit contenir les colonnes :
+    Marque, Catégorie, Famille, Produit, Capacité_Dimension.
+    """
 
-        st.warning(
-            "La table Produits est vide."
-        )
+    if df_products is None:
+        df_products = pd.DataFrame()
 
-        return (
-            "--- Sélectionner ---",
-            "--- Sélectionner ---",
-            "--- Sélectionner ---",
-            "--- Sélectionner ---",
-            "--- Sélectionner ---"
-        )
+    # Après l'ajout, appliquer les valeurs au prochain affichage,
+    # une fois les nouvelles données rechargées depuis Google Sheets.
+    pending_key = f"{prefix}_pending_product"
+    pending = st.session_state.pop(pending_key, None)
+    if pending:
+        for field, value in pending.items():
+            st.session_state[f"{prefix}_{field}"] = value
 
-    # -----------------------------------------------------
+    # Normaliser les colonnes disponibles sans modifier la feuille.
+    required_columns = [
+        "Marque",
+        "Catégorie",
+        "Famille",
+        "Produit",
+        "Capacité_Dimension"
+    ]
+
+    for column in required_columns:
+        if column not in df_products.columns:
+            df_products[column] = ""
+
     # MARQUE
-    # -----------------------------------------------------
-
-    marque_values = unique_sorted(
-        df_products,
-        "Marque"
-    )
-
+    marque_values = unique_sorted(df_products, "Marque")
     marque = st.selectbox(
         "Marque",
-        ["--- Sélectionner ---"] + marque_values,
+        [PLACEHOLDER] + marque_values,
         key=f"{prefix}_marque"
     )
 
-    # -----------------------------------------------------
     # CATEGORIE
-    # -----------------------------------------------------
-
     temp = filter_products(
         df_products,
-        marque=(
-            ""
-            if marque == "--- Sélectionner ---"
-            else marque
-        )
+        marque="" if marque == PLACEHOLDER else marque
     )
-
-    categorie_values = unique_sorted(
-        temp,
-        "Catégorie"
-    )
-
+    categorie_values = unique_sorted(temp, "Catégorie")
     categorie = st.selectbox(
         "Catégorie",
-        ["--- Sélectionner ---"] + categorie_values,
+        [PLACEHOLDER] + categorie_values,
         key=f"{prefix}_categorie"
     )
 
-    # -----------------------------------------------------
     # FAMILLE
-    # -----------------------------------------------------
-
     temp = filter_products(
         df_products,
-        marque=(
-            ""
-            if marque == "--- Sélectionner ---"
-            else marque
-        ),
-        categorie=(
-            ""
-            if categorie == "--- Sélectionner ---"
-            else categorie
-        )
+        marque="" if marque == PLACEHOLDER else marque,
+        categorie="" if categorie == PLACEHOLDER else categorie
     )
-
-    famille_values = unique_sorted(
-        temp,
-        "Famille"
-    )
-
+    famille_values = unique_sorted(temp, "Famille")
     famille = st.selectbox(
         "Famille",
-        ["--- Sélectionner ---"] + famille_values,
+        [PLACEHOLDER] + famille_values,
         key=f"{prefix}_famille"
     )
 
-    # -----------------------------------------------------
     # PRODUIT
-    # -----------------------------------------------------
-
     temp = filter_products(
         df_products,
-        marque=(
-            ""
-            if marque == "--- Sélectionner ---"
-            else marque
-        ),
-        categorie=(
-            ""
-            if categorie == "--- Sélectionner ---"
-            else categorie
-        ),
-        famille=(
-            ""
-            if famille == "--- Sélectionner ---"
-            else famille
-        )
+        marque="" if marque == PLACEHOLDER else marque,
+        categorie="" if categorie == PLACEHOLDER else categorie,
+        famille="" if famille == PLACEHOLDER else famille
     )
-
-    product_values = unique_sorted(
-        temp,
-        "Produit"
-    )
-
+    product_values = unique_sorted(temp, "Produit")
     produit = st.selectbox(
         "Produit",
-        ["--- Sélectionner ---"] + product_values,
+        [PLACEHOLDER] + product_values,
         key=f"{prefix}_produit"
     )
 
-    # -----------------------------------------------------
     # CAPACITE / DIMENSION
-    # -----------------------------------------------------
-
     temp = filter_products(
         df_products,
-        marque=(
-            ""
-            if marque == "--- Sélectionner ---"
-            else marque
-        ),
-        categorie=(
-            ""
-            if categorie == "--- Sélectionner ---"
-            else categorie
-        ),
-        famille=(
-            ""
-            if famille == "--- Sélectionner ---"
-            else famille
-        ),
-        produit=(
-            ""
-            if produit == "--- Sélectionner ---"
-            else produit
-        )
+        marque="" if marque == PLACEHOLDER else marque,
+        categorie="" if categorie == PLACEHOLDER else categorie,
+        famille="" if famille == PLACEHOLDER else famille,
+        produit="" if produit == PLACEHOLDER else produit
     )
-
-    dimension_values = unique_sorted(
-        temp,
-        "Capacité_Dimension"
-    )
-
+    dimension_values = unique_sorted(temp, "Capacité_Dimension")
     capacite = st.selectbox(
         "Capacité / Dimension",
-        ["--- Sélectionner ---"] + dimension_values,
+        [PLACEHOLDER] + dimension_values,
         key=f"{prefix}_capacite"
     )
 
-    return (
-        marque,
-        categorie,
-        famille,
-        produit,
-        capacite
-    )
+    # AJOUT PRODUIT : activé uniquement dans les modules autorisés.
+    if allow_add:
+        with st.expander("➕ Produit introuvable ? Ajouter un nouveau produit"):
+            st.info(
+                "Renseignez les cinq informations. Le nouveau produit sera "
+                "ajouté au référentiel Produits et disponible dans les autres modules."
+            )
+
+            with st.form(f"{prefix}_add_product_form", clear_on_submit=False):
+                c1, c2 = st.columns(2)
+                with c1:
+                    new_marque = st.text_input(
+                        "Marque *",
+                        value="" if marque == PLACEHOLDER else marque,
+                        key=f"{prefix}_new_marque"
+                    )
+                    new_categorie = st.text_input(
+                        "Catégorie *",
+                        value="" if categorie == PLACEHOLDER else categorie,
+                        key=f"{prefix}_new_categorie"
+                    )
+                    new_famille = st.text_input(
+                        "Famille *",
+                        value="" if famille == PLACEHOLDER else famille,
+                        key=f"{prefix}_new_famille"
+                    )
+                with c2:
+                    new_produit = st.text_input(
+                        "Désignation du produit *",
+                        value="" if produit == PLACEHOLDER else produit,
+                        key=f"{prefix}_new_produit"
+                    )
+                    new_dimension = st.text_input(
+                        "Capacité / Dimension *",
+                        value="" if capacite == PLACEHOLDER else capacite,
+                        key=f"{prefix}_new_dimension"
+                    )
+
+                submitted = st.form_submit_button(
+                    "💾 Enregistrer le nouveau produit",
+                    use_container_width=True
+                )
+
+            if submitted:
+                product_data = {
+                    "Marque": clean_text(new_marque),
+                    "Catégorie": clean_text(new_categorie),
+                    "Famille": clean_text(new_famille),
+                    "Produit": clean_text(new_produit),
+                    "Capacité_Dimension": clean_text(new_dimension)
+                }
+
+                missing = [name for name, value in product_data.items() if not value]
+                if missing:
+                    st.error("Veuillez renseigner tous les champs obligatoires : " + ", ".join(missing))
+                else:
+                    # Vérifier que la feuille possède bien les colonnes attendues.
+                    try:
+                        products_ws = get_ws(SHEET_PRODUCTS)
+                        headers = [str(x).strip() for x in products_ws.row_values(1)]
+                        missing_headers = [h for h in required_columns if h not in headers]
+
+                        if missing_headers:
+                            st.error(
+                                "La feuille Produits doit contenir ces colonnes "
+                                "dans sa première ligne : " + ", ".join(missing_headers)
+                            )
+                        else:
+                            # Eviter les doublons sur la combinaison des cinq champs.
+                            duplicate = False
+                            if not df_products.empty:
+                                existing = df_products.copy()
+                                for col in required_columns:
+                                    existing[col] = existing[col].fillna("").astype(str).str.strip().str.casefold()
+                                duplicate_mask = pd.Series(True, index=existing.index)
+                                for col, value in product_data.items():
+                                    duplicate_mask &= existing[col] == value.casefold()
+                                duplicate = bool(duplicate_mask.any())
+
+                            if duplicate:
+                                st.warning("Ce produit existe déjà dans le référentiel Produits.")
+                                st.session_state[pending_key] = {
+                                    "marque": product_data["Marque"],
+                                    "categorie": product_data["Catégorie"],
+                                    "famille": product_data["Famille"],
+                                    "produit": product_data["Produit"],
+                                    "capacite": product_data["Capacité_Dimension"]
+                                }
+                                st.rerun()
+                            else:
+                                success = append_dict_row(SHEET_PRODUCTS, product_data)
+                                if success:
+                                    st.session_state[pending_key] = {
+                                        "marque": product_data["Marque"],
+                                        "categorie": product_data["Catégorie"],
+                                        "famille": product_data["Famille"],
+                                        "produit": product_data["Produit"],
+                                        "capacite": product_data["Capacité_Dimension"]
+                                    }
+                                    clear_sheet_cache(SHEET_PRODUCTS)
+                                    st.success("✅ Nouveau produit ajouté au référentiel.")
+                                    st.rerun()
+                    except Exception as e:
+                        st.error(f"Erreur lors de l'ajout du produit : {e}")
+
+    return marque, categorie, famille, produit, capacite
 
 
 # =========================================================
@@ -1062,13 +1101,8 @@ elif menu == "📦 Distribution Numérique":
 
         st.stop()
 
-    if df_products.empty:
-
-        st.warning(
-            "La table Produits est vide."
-        )
-
-        st.stop()
+    # Le référentiel Produits peut être vide au démarrage :
+    # un produit pourra être créé directement depuis ce formulaire.
 
     # -----------------------------------------------------
     # POS
@@ -1098,7 +1132,8 @@ elif menu == "📦 Distribution Numérique":
         capacite
     ) = product_cascade(
         df_products,
-        prefix="distribution"
+        prefix="distribution",
+        allow_add=True
     )
 
     col1, col2 = st.columns(2)
@@ -2095,17 +2130,11 @@ elif menu == "💰 Relevé Prix":
         SHEET_PRODUCTS
     )
 
-    if (
-        df_pos.empty
-        or df_products.empty
-    ):
-
-        st.warning(
-            "Les tables POS et Produits "
-            "doivent être renseignées."
-        )
-
+    if df_pos.empty:
+        st.warning("La table POS doit être renseignée.")
         st.stop()
+
+    # Le référentiel Produits peut être complété depuis ce module.
 
     pos = st.selectbox(
         "POS",
@@ -2125,7 +2154,8 @@ elif menu == "💰 Relevé Prix":
         capacite
     ) = product_cascade(
         df_products,
-        prefix="price"
+        prefix="price",
+        allow_add=True
     )
 
     col1, col2 = st.columns(2)
