@@ -881,11 +881,15 @@ def build_planned_pos_table(
         planned["Fin tournée"] = ""
 
     planned["Statut visite"] = planned["Statut visite"].fillna("Planifiée").replace("", "Planifiée")
+    # Tableau de planning simplifié : ne pas afficher les informations
+    # géographiques/adresse (Wilaya, Commune, Adresse).
     preferred_columns = [
-        "ID_POS", "Nom_POS", "Nom", "Wilaya", "Commune", "Adresse",
+        "ID_POS", "Nom_POS", "Nom",
         "Statut visite", "Début tournée", "Fin tournée"
     ]
     display_columns = [column for column in preferred_columns if column in planned.columns]
+    if "Nom_POS" in display_columns and "Nom" in display_columns:
+        display_columns.remove("Nom")
     if not display_columns:
         display_columns = ["ID_POS", "Statut visite"]
     return planned[display_columns].reset_index(drop=True)
