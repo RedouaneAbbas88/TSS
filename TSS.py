@@ -94,13 +94,17 @@ def get_spreadsheet():
     return client.open_by_key(SPREADSHEET_ID)
 
 
+@st.cache_resource(show_spinner=False)
+def _get_worksheet_cached(sheet_name):
+    """Réutilise l'objet worksheet pour éviter de redemander ses métadonnées à chaque rerun."""
+    return get_spreadsheet().worksheet(sheet_name)
+
+
 def get_ws(sheet_name):
 
     try:
 
-        spreadsheet = get_spreadsheet()
-
-        return spreadsheet.worksheet(sheet_name)
+        return _get_worksheet_cached(sheet_name)
 
     except gspread.WorksheetNotFound:
 
@@ -268,6 +272,13 @@ def upload_photo_to_drive(uploaded_file, prefix="materiel"):
 # CHARGEMENT DES DONNEES
 # =========================================================
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_sheet_headers(sheet_name):
+    """Cache les en-têtes : évite un appel row_values(1) à chaque enregistrement."""
+    ws = get_ws(sheet_name)
+    return [str(value).strip() for value in ws.row_values(1)]
+
+
 @st.cache_data(
     ttl=600,
     show_spinner=False
@@ -329,9 +340,10 @@ def clear_sheet_cache(sheet_name=None):
 
         if sheet_name:
             load_sheet.clear(sheet_name)
-
+            load_sheet_headers.clear(sheet_name)
         else:
             load_sheet.clear()
+            load_sheet_headers.clear()
 
     except Exception:
 
@@ -373,7 +385,7 @@ def append_row(sheet_name, row):
                 if attempt < max_attempts - 1:
 
                     time.sleep(
-                        2 * (attempt + 1)
+                        5 * (2 ** attempt)
                     )
 
                     continue
@@ -410,10 +422,7 @@ def append_dict_row(sheet_name, values):
 
         ws = get_ws(sheet_name)
 
-        headers = [
-            str(x).strip()
-            for x in ws.row_values(1)
-        ]
+        headers = load_sheet_headers(sheet_name)
 
         row = [
             values.get(header, "")
@@ -1201,8 +1210,7 @@ elif menu == "📦 Distribution Numérique":
         key="distribution_date"
     )
 
-    # Rafraîchir le planning pour éviter d'afficher une ancienne liste en cache.
-    clear_sheet_cache(SHEET_VISITS)
+    # Le planning est mis en cache ; il est invalidé uniquement après une modification.
     df_visits_distribution = load_sheet(SHEET_VISITS)
 
     pos_names = get_user_planned_pos(
@@ -2257,7 +2265,6 @@ elif menu == "💰 Relevé Prix":
     )
 
     # Les POS proposés proviennent exclusivement du planning de l'utilisateur.
-    clear_sheet_cache(SHEET_VISITS)
     df_visits_price = load_sheet(SHEET_VISITS)
 
     pos_names = get_user_planned_pos(
@@ -3253,7 +3260,6 @@ elif menu == "⚙️ Paramétrage des visites":
 
     df_pos_admin = load_sheet(SHEET_POS)
     df_users_admin = load_sheet(SHEET_USERS)
-    clear_sheet_cache(SHEET_VISITS)
     df_visits_admin = load_sheet(SHEET_VISITS)
 
     if df_pos_admin.empty or "ID_POS" not in df_pos_admin.columns:
