@@ -826,6 +826,29 @@ def get_user_planned_pos(df_visits, visit_date, user_id):
     return sorted(filtered["ID_POS"].drop_duplicates().tolist())
 
 
+def build_planned_pos_table(df_pos, planned_pos_ids):
+    """Construit la liste lisible des POS affectés à l'utilisateur."""
+    if df_pos is None or df_pos.empty or not planned_pos_ids:
+        return pd.DataFrame(columns=["ID_POS"])
+
+    pos = df_pos.copy()
+    if "ID_POS" not in pos.columns:
+        return pd.DataFrame({"ID_POS": planned_pos_ids})
+
+    pos["ID_POS"] = pos["ID_POS"].apply(clean_text)
+    planned = pos[pos["ID_POS"].isin(planned_pos_ids)].drop_duplicates(subset=["ID_POS"]).copy()
+
+    preferred_columns = [
+        "ID_POS", "Nom_POS", "Nom", "Wilaya", "Commune", "Adresse",
+        "Categorie", "Catégorie", "Type_POS"
+    ]
+    display_columns = [column for column in preferred_columns if column in planned.columns]
+    if not display_columns:
+        display_columns = ["ID_POS"]
+
+    return planned[display_columns].reset_index(drop=True)
+
+
 # =========================================================
 # LOGIN
 # =========================================================
@@ -1194,6 +1217,17 @@ elif menu == "📦 Distribution Numérique":
             "dans le tableau Visites POS."
         )
         st.stop()
+
+    st.subheader("🗓️ Mon planning des visites")
+    st.caption(
+        f"{len(pos_names)} POS prévu(s) pour le {date_visite.strftime('%d/%m/%Y')}. "
+        "Cette liste correspond uniquement à votre planning personnel."
+    )
+    st.dataframe(
+        build_planned_pos_table(df_pos, pos_names),
+        use_container_width=True,
+        hide_index=True
+    )
 
     if st.session_state.get("distribution_pos") not in ["--- Sélectionner ---"] + pos_names:
         st.session_state["distribution_pos"] = "--- Sélectionner ---"
@@ -2238,6 +2272,17 @@ elif menu == "💰 Relevé Prix":
             "dans le tableau Visites POS."
         )
         st.stop()
+
+    st.subheader("🗓️ Mon planning des visites")
+    st.caption(
+        f"{len(pos_names)} POS prévu(s) pour le {date_releve.strftime('%d/%m/%Y')}. "
+        "Cette liste correspond uniquement à votre planning personnel."
+    )
+    st.dataframe(
+        build_planned_pos_table(df_pos, pos_names),
+        use_container_width=True,
+        hide_index=True
+    )
 
     if st.session_state.get("price_pos") not in ["--- Sélectionner ---"] + pos_names:
         st.session_state["price_pos"] = "--- Sélectionner ---"
