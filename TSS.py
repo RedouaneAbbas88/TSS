@@ -835,27 +835,179 @@ def get_user_planned_pos(df_visits, visit_date, user_id):
     return sorted(filtered["ID_POS"].drop_duplicates().tolist())
 
 
-def build_planned_pos_table(df_pos, planned_pos_ids):
-    """Construit la liste lisible des POS affectés à l'utilisateur."""
+def build_planned_pos_table(
+    df_pos, planned_pos_ids, df_visits=None, user_id=None, visit_date=None
+):
+    """Construit le planning personnel avec le statut de chaque tournée."""
     if df_pos is None or df_pos.empty or not planned_pos_ids:
-        return pd.DataFrame(columns=["ID_POS"])
+        return pd.DataFrame(columns=["ID_POS", "Nom_POS", "Statut visite"])
 
     pos = df_pos.copy()
     if "ID_POS" not in pos.columns:
-        return pd.DataFrame({"ID_POS": planned_pos_ids})
+        planned = pd.DataFrame({"ID_POS": planned_pos_ids})
+    else:
+        pos["ID_POS"] = pos["ID_POS"].apply(clean_text)
+        planned = pos[pos["ID_POS"].isin(planned_pos_ids)].drop_duplicates(subset=["ID_POS"]).copy()
 
-    pos["ID_POS"] = pos["ID_POS"].apply(clean_text)
-    planned = pos[pos["ID_POS"].isin(planned_pos_ids)].drop_duplicates(subset=["ID_POS"]).copy()
+    if "Nom_POS" not in planned.columns:
+        planned["Nom_POS"] = planned.get("Nom", "")
 
+    status_rows = []
+    if df_visits is not None and not df_visits.empty:
+        date_col = next((c for c in ("Date_Visite", "Date") if c in df_visits.columns), None)
+        if date_col and {"ID_POS", "ID_User"}.issubset(df_visits.columns):
+            v = df_visits.copy()
+            v["ID_POS"] = v["ID_POS"].apply(clean_text)
+            v["ID_User"] = v["ID_User"].apply(clean_text)
+            v["_visit_date"] = pd.to_datetime(v[date_col], errors="coerce", dayfirst=True).dt.date
+            v = v[(v["ID_POS"].isin(planned_pos_ids)) & (v["ID_User"] == clean_text(user_id))]
+            if visit_date is not None:
+                v = v[v["_visit_date"] == visit_date]
+            for _, row in v.iterrows():
+                status_rows.append({
+                    "ID_POS": clean_text(row.get("ID_POS", "")),
+                    "Statut visite": clean_text(row.get("Statut_Tournee", "")) or "Planifiée",
+                    "Début tournée": clean_text(row.get("Heure_Debut", "")),
+                    "Fin tournée": clean_text(row.get("Heure_Fin", "")),
+                })
+
+    status_df = pd.DataFrame(status_rows)
+    if not status_df.empty:
+        status_df = status_df.drop_duplicates(subset=["ID_POS"], keep="last")
+        planned = planned.merge(status_df, on="ID_POS", how="left")
+    else:
+        planned["Statut visite"] = "Planifiée"
+        planned["Début tournée"] = ""
+        planned["Fin tournée"] = ""
+
+    planned["Statut visite"] = planned["Statut visite"].fillna("Planifiée").replace("", "Planifiée")
     preferred_columns = [
         "ID_POS", "Nom_POS", "Nom", "Wilaya", "Commune", "Adresse",
-        "Categorie", "Catégorie", "Type_POS"
+        "Statut visite", "Début tournée", "Fin tournée"
     ]
     display_columns = [column for column in preferred_columns if column in planned.columns]
     if not display_columns:
-        display_columns = ["ID_POS"]
-
+        display_columns = ["ID_POS", "Statut visite"]
     return planned[display_columns].reset_index(drop=True)
+
+
+def _column_letter(column_number):
+    """Convertit un numéro de colonne (1-based) en lettre Google Sheets."""
+    result = ""
+    while column_number:
+        column_number, remainder = divmod(column_number - 1, 26)
+        result = chr(65 + remainder) + result
+    return result
+
+
+def get_planned_visit_row(df_visits, pos_id, visit_date, user_id):
+    """Retourne le numéro de ligne Sheets et l'affectation de visite correspondante."""
+    if df_visits is None or df_visits.empty:
+        return None, None
+    date_col = next((c for c in ("Date_Visite", "Date") if c in df_visits.columns), None)
+    if date_col is None or not {"ID_POS", "ID_User"}.issubset(df_visits.columns):
+        return None, None
+    v = df_visits.copy()
+    v["_pos"] = v["ID_POS"].apply(clean_text)
+    v["_user"] = v["ID_User"].apply(clean_text)
+    v["_date"] = pd.to_datetime(v[date_col], errors="coerce", dayfirst=True).dt.date
+    matches = v[(v["_pos"] == clean_text(pos_id)) &
+                (v["_user"] == clean_text(user_id)) &
+                (v["_date"] == visit_date)]
+    if matches.empty:
+        return None, None
+    # DataFrame index 0 correspond à la ligne 2 de Google Sheets (ligne 1 = en-têtes).
+    idx = matches.index[-1]
+    return int(idx) + 2, matches.iloc[-1]
+
+
+def update_visit_tournee(df_visits, pos_id, visit_date, user_id, values):
+    """Met à jour le statut de tournée sur la ligne Visites_POS sans réécrire toute la feuille."""
+    row_number, visit_row = get_planned_visit_row(df_visits, pos_id, visit_date, user_id)
+    if row_number is None:
+        st.error("Affectation introuvable dans Visites_POS. Actualisez le planning ou contactez l'administrateur.")
+        return False
+    try:
+        required_columns = ["Statut_Tournee", "Heure_Debut", "Heure_Fin", "Motif_Cloture", "Observation_Cloture"]
+        headers = load_sheet_headers(SHEET_VISITS)
+        missing = [column for column in required_columns if column not in headers]
+        if missing:
+            # Ajoute les colonnes de suivi à droite de la feuille en une seule écriture.
+            start_col = len(headers) + 1
+            ws = get_ws(SHEET_VISITS)
+            ws.update(
+                f"{_column_letter(start_col)}1:{_column_letter(start_col + len(missing) - 1)}1",
+                [missing],
+                value_input_option="USER_ENTERED"
+            )
+            headers = headers + missing
+            load_sheet_headers.clear(SHEET_VISITS)
+
+        ws = get_ws(SHEET_VISITS)
+        updates = []
+        for column_name, value in values.items():
+            if column_name in headers:
+                col_number = headers.index(column_name) + 1
+                cell = f"{_column_letter(col_number)}{row_number}"
+                updates.append({"range": cell, "values": [[value]]})
+        if updates:
+            ws.batch_update(updates, value_input_option="USER_ENTERED")
+        clear_sheet_cache(SHEET_VISITS)
+        return True
+    except Exception as exc:
+        st.error(f"Impossible de mettre à jour la tournée : {exc}")
+        return False
+
+
+def render_visit_tournee(df_visits, selected_pos, visit_date, user_id, key_prefix):
+    """Démarre/ferme la tournée d'un POS. Retourne True uniquement si elle est en cours."""
+    if not selected_pos or selected_pos == "--- Sélectionner ---":
+        st.info("Sélectionnez un POS dans votre planning pour démarrer sa tournée.")
+        return False
+
+    row_number, visit_row = get_planned_visit_row(df_visits, selected_pos, visit_date, user_id)
+    if row_number is None:
+        st.error("Ce POS ne correspond pas à une affectation de votre planning pour cette date.")
+        return False
+
+    status = clean_text(visit_row.get("Statut_Tournee", "")) or "Planifiée"
+    st.markdown("#### 🚗 Suivi de la tournée")
+    if status.lower() in ("planifiée", "planifiee", "planifie", ""):
+        st.info("Cette visite est planifiée, mais la tournée n'a pas encore commencé.")
+        if st.button("▶️ Démarrer la tournée", key=f"{key_prefix}_start_tournee", use_container_width=True):
+            now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if update_visit_tournee(df_visits, selected_pos, visit_date, user_id, {
+                "Statut_Tournee": "En cours", "Heure_Debut": now_text,
+                "Heure_Fin": "", "Motif_Cloture": "", "Observation_Cloture": ""
+            }):
+                st.success("Tournée démarrée. Vous pouvez maintenant saisir plusieurs produits pour ce POS.")
+                st.rerun()
+        return False
+
+    if status.lower() in ("en cours", "en_cours", "encours"):
+        started = clean_text(visit_row.get("Heure_Debut", ""))
+        st.success(f"Tournée en cours{(' depuis ' + started) if started else ''}. Vous pouvez enregistrer plusieurs produits.")
+        with st.form(f"{key_prefix}_close_tournee_form"):
+            outcome = st.selectbox(
+                "Résultat de la visite",
+                ["Visite effectuée", "POS fermé", "Responsable absent", "Refus d'accès", "Autre"],
+                key=f"{key_prefix}_close_outcome"
+            )
+            close_observation = st.text_area("Observation de clôture (facultatif)", key=f"{key_prefix}_close_observation")
+            close_clicked = st.form_submit_button("🔒 Clôturer la tournée", use_container_width=True)
+        if close_clicked:
+            final_status = "Visitée" if outcome == "Visite effectuée" else outcome
+            now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if update_visit_tournee(df_visits, selected_pos, visit_date, user_id, {
+                "Statut_Tournee": final_status, "Heure_Fin": now_text,
+                "Motif_Cloture": outcome, "Observation_Cloture": close_observation
+            }):
+                st.success(f"Tournée clôturée : {final_status}.")
+                st.rerun()
+        return True
+
+    st.warning(f"Cette tournée est déjà clôturée : **{status}**.")
+    return False
 
 
 # =========================================================
@@ -1232,7 +1384,10 @@ elif menu == "📦 Distribution Numérique":
         "Cette liste correspond uniquement à votre planning personnel."
     )
     st.dataframe(
-        build_planned_pos_table(df_pos, pos_names),
+        build_planned_pos_table(
+            df_pos, pos_names, df_visits_distribution,
+            st.session_state.user_id, date_visite
+        ),
         use_container_width=True,
         hide_index=True
     )
@@ -1245,6 +1400,14 @@ elif menu == "📦 Distribution Numérique":
         ["--- Sélectionner ---"] + pos_names,
         key="distribution_pos"
     )
+
+    distribution_tournee_open = render_visit_tournee(
+        df_visits_distribution, selected_pos, date_visite,
+        st.session_state.user_id, "distribution"
+    )
+    if not distribution_tournee_open:
+        st.info("Démarrez la tournée du POS sélectionné pour commencer la saisie. Une fois démarrée, vous pourrez enregistrer plusieurs produits avant de la clôturer.")
+        st.stop()
 
     st.subheader(
         "📦 Produit"
@@ -2286,7 +2449,10 @@ elif menu == "💰 Relevé Prix":
         "Cette liste correspond uniquement à votre planning personnel."
     )
     st.dataframe(
-        build_planned_pos_table(df_pos, pos_names),
+        build_planned_pos_table(
+            df_pos, pos_names, df_visits_price,
+            st.session_state.user_id, date_releve
+        ),
         use_container_width=True,
         hide_index=True
     )
@@ -2299,6 +2465,14 @@ elif menu == "💰 Relevé Prix":
         ["--- Sélectionner ---"] + pos_names,
         key="price_pos"
     )
+
+    price_tournee_open = render_visit_tournee(
+        df_visits_price, pos, date_releve,
+        st.session_state.user_id, "price"
+    )
+    if not price_tournee_open:
+        st.info("Démarrez la tournée du POS sélectionné pour commencer la saisie. Vous pourrez enregistrer plusieurs relevés avant de la clôturer.")
+        st.stop()
 
     (
         marque,
