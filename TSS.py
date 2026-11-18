@@ -1237,7 +1237,7 @@ commercial_roles = {"commerciale", "commercial"}
 
 if role_key in full_access_roles:
     menu_items = all_menu_items.copy()
-    menu_items.insert(7, "⚙️ Paramétrage des visites")
+    menu_items.append("⚙️ Paramétrage des visites")
 elif role_key in supervisor_roles:
     # Accès à tous les modules opérationnels, sauf au paramétrage du planning.
     menu_items = all_menu_items.copy()
