@@ -1057,6 +1057,12 @@ if not st.session_state.logged_in:
         unsafe_allow_html=True
     )
 
+    # Actualisation manuelle des données Google Sheets (notamment les noms utilisateurs).
+    if st.button("🔄 Actualiser la liste des utilisateurs", use_container_width=True):
+        load_sheet.clear()
+        load_sheet_headers.clear()
+        st.rerun()
+
     users = load_sheet(
         SHEET_USERS
     )
@@ -1203,6 +1209,13 @@ st.sidebar.write(
 )
 
 st.sidebar.markdown("---")
+
+if st.sidebar.button("🔄 Actualiser les données", use_container_width=True):
+    # Vide le cache des feuilles et des en-têtes pour relire les valeurs actuelles
+    # depuis Google Sheets sans attendre l'expiration automatique du cache.
+    load_sheet.clear()
+    load_sheet_headers.clear()
+    st.rerun()
 
 role_key = normalize_role(st.session_state.role)
 
