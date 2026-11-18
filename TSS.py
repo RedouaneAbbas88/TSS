@@ -801,17 +801,37 @@ def logout():
 
 
 def normalize_visit_type(value):
-    """Normalise le type d'activité stocké dans Visites_POS."""
+    """Normalise les quatre activités planifiables dans Visites_POS."""
     value = clean_text(value).strip().upper()
-    if value in ("DN", "DISTRIBUTION NUMERIQUE", "DISTRIBUTION NUMÉRIQUE"):
+    value = value.replace("É", "E").replace("È", "E").replace("Ê", "E")
+    value = value.replace("_", " ").replace("-", " ")
+    value = " ".join(value.split())
+    if value in ("DN", "DISTRIBUTION NUMERIQUE"):
         return "DN"
-    if value in ("PRIX", "RELEVE PRIX", "RELEVÉ PRIX", "RELEVE DES PRIX", "RELEVÉ DES PRIX"):
+    if value in ("PRIX", "RELEVE PRIX", "RELEVE DES PRIX"):
         return "PRIX"
+    if value in ("VISITES POS", "VISITE POS", "VISITE", "VISITES"):
+        return "VISITES_POS"
+    if value in ("MATERIEL POS", "MATERIEL", "MATERIELS POS", "CONTROLE MATERIEL"):
+        return "MATERIEL_POS"
     return ""  # Anciennes affectations sans Type_Visite : compatibilité historique.
 
 
 def visit_type_label(value):
-    return "Distribution numérique" if normalize_visit_type(value) == "DN" else "Relevé des prix"
+    labels = {
+        "DN": "Distribution numérique",
+        "PRIX": "Relevé des prix",
+        "VISITES_POS": "Visites POS",
+        "MATERIEL_POS": "Matériel POS"
+    }
+    return labels.get(normalize_visit_type(value), "Activité non précisée")
+
+
+def normalize_role(value):
+    """Normalise les rôles pour appliquer les droits d'accès."""
+    role = clean_text(value).strip().lower()
+    role = " ".join(role.replace("_", " ").replace("-", " ").split())
+    return role
 
 
 def get_user_planned_pos(df_visits, visit_date, user_id, visit_type):
@@ -1184,7 +1204,9 @@ st.sidebar.write(
 
 st.sidebar.markdown("---")
 
-menu_items = [
+role_key = normalize_role(st.session_state.role)
+
+all_menu_items = [
     "🏠 Dashboard",
     "📦 Distribution Numérique",
     "👤 Profil Client",
@@ -1196,9 +1218,26 @@ menu_items = [
     "📈 Statistiques"
 ]
 
-# Le paramétrage du planning est réservé aux administrateurs.
-if clean_text(st.session_state.role).lower() in ("admin", "administrateur", "administrator"):
+full_access_roles = {"admin", "administrateur", "administrator", "manager trade"}
+supervisor_roles = {"superviseur trade", "supervisor trade"}
+commercial_roles = {"commerciale", "commercial"}
+
+if role_key in full_access_roles:
+    menu_items = all_menu_items.copy()
     menu_items.insert(7, "⚙️ Paramétrage des visites")
+elif role_key in supervisor_roles:
+    # Accès à tous les modules opérationnels, sauf au paramétrage du planning.
+    menu_items = all_menu_items.copy()
+elif role_key in commercial_roles:
+    # Le rôle Commerciale est limité au Profil Client.
+    menu_items = ["👤 Profil Client"]
+else:
+    menu_items = []
+    st.sidebar.error("Votre rôle n'est pas reconnu. Contactez l'administrateur.")
+
+if not menu_items:
+    st.error("Aucun accès n'est associé à votre rôle. Contactez l'administrateur.")
+    st.stop()
 
 menu = st.sidebar.radio(
     "Menu",
@@ -2872,6 +2911,40 @@ elif menu == "🧰 Matériel POS":
         SHEET_DISTRIBUTION
     )
 
+    # Planning obligatoire : l'utilisateur ne peut travailler que sur
+    # les POS qui lui sont affectés pour l'activité Matériel POS.
+    material_date = st.date_input(
+        "Date de l'activité",
+        value=datetime.now().date(),
+        key="material_activity_date"
+    )
+    df_material_visits = load_sheet(SHEET_VISITS)
+    material_pos_ids = get_user_planned_pos(
+        df_material_visits, material_date, st.session_state.user_id, "MATERIEL_POS"
+    )
+    if not material_pos_ids:
+        st.warning("Aucun POS ne vous est affecté pour l'activité Matériel POS à cette date. Contactez votre responsable pour être planifié.")
+        st.stop()
+
+    st.subheader("🗓️ Mon planning — Matériel POS")
+    st.dataframe(
+        build_planned_pos_table(
+            df_pos, material_pos_ids, df_material_visits,
+            st.session_state.user_id, material_date, "MATERIEL_POS"
+        ),
+        use_container_width=True,
+        hide_index=True
+    )
+    selected_material_pos = st.selectbox(
+        "Point de vente prévu",
+        ["--- Sélectionner ---"] + material_pos_ids,
+        key="material_planned_pos"
+    )
+    material_tournee_open = render_visit_tournee(
+        df_material_visits, selected_material_pos, material_date,
+        st.session_state.user_id, "material_activity", "MATERIEL_POS"
+    )
+
     st.info(
         "Suivi des tinda, logos, présentoirs, racks, "
         "vitrines, posters, affichage et autres matériels."
@@ -2891,7 +2964,10 @@ elif menu == "🧰 Matériel POS":
 
     with tab_add:
 
-        if df_pos.empty:
+        if not material_tournee_open:
+            st.info("Démarrez la tournée Matériel POS depuis votre planning avant d'enregistrer une installation.")
+
+        elif df_pos.empty:
 
             st.warning(
                 "La table POS est vide."
@@ -2905,15 +2981,8 @@ elif menu == "🧰 Matériel POS":
 
         else:
 
-            pos = st.selectbox(
-                "Point de vente",
-                ["--- Sélectionner ---"]
-                + unique_sorted(
-                    df_pos,
-                    "ID_POS"
-                ),
-                key="mat_pos"
-            )
+            pos = selected_material_pos
+            st.info(f"POS sélectionné depuis le planning : **{pos}**")
 
             type_mat = st.selectbox(
                 "Type de matériel",
@@ -3142,7 +3211,10 @@ elif menu == "🧰 Matériel POS":
 
     with tab_control:
 
-        if (
+        if not material_tournee_open:
+            st.info("Démarrez la tournée Matériel POS depuis votre planning avant d'effectuer un contrôle.")
+
+        elif (
             df_pos.empty
             or df_material_pos.empty
         ):
@@ -3153,15 +3225,8 @@ elif menu == "🧰 Matériel POS":
 
         else:
 
-            pos_c = st.selectbox(
-                "POS à contrôler",
-                ["--- Sélectionner ---"]
-                + unique_sorted(
-                    df_pos,
-                    "ID_POS"
-                ),
-                key="control_pos"
-            )
+            pos_c = selected_material_pos
+            st.info(f"POS à contrôler : **{pos_c}**")
 
             if pos_c != "--- Sélectionner ---":
 
@@ -3396,10 +3461,14 @@ elif menu == "🧰 Matériel POS":
             "📋 Matériels installés"
         )
 
-        if not df_material_pos.empty:
+        material_history = df_material_pos.copy()
+        if not material_history.empty and "ID_POS" in material_history.columns:
+            material_history = material_history[material_history["ID_POS"].apply(clean_text).isin(material_pos_ids)]
+
+        if not material_history.empty:
 
             st.dataframe(
-                df_material_pos,
+                material_history,
                 use_container_width=True,
                 hide_index=True
             )
@@ -3414,10 +3483,14 @@ elif menu == "🧰 Matériel POS":
             "🔎 Contrôles effectués"
         )
 
-        if not df_material_control.empty:
+        control_history = df_material_control.copy()
+        if not control_history.empty and "ID_POS" in control_history.columns:
+            control_history = control_history[control_history["ID_POS"].apply(clean_text).isin(material_pos_ids)]
+
+        if not control_history.empty:
 
             st.dataframe(
-                df_material_control,
+                control_history,
                 use_container_width=True,
                 hide_index=True
             )
@@ -3435,13 +3508,13 @@ elif menu == "🧰 Matériel POS":
 
 elif menu == "⚙️ Paramétrage des visites":
 
-    # Sécurité : page réservée aux administrateurs.
-    if clean_text(st.session_state.role).lower() not in ("admin", "administrateur", "administrator"):
-        st.error("Accès réservé à l'administrateur.")
+    # Sécurité : page réservée aux rôles Admin et Manager Trade.
+    if normalize_role(st.session_state.role) not in {"admin", "administrateur", "administrator", "manager trade"}:
+        st.error("Accès réservé aux rôles Admin et Manager Trade.")
         st.stop()
 
     st.header("⚙️ Paramétrage des visites")
-    st.caption("Planifiez séparément la Distribution numérique et le Relevé des prix. Un POS peut être affecté aux deux activités le même jour.")
+    st.caption("Affectez une ou plusieurs activités à chaque POS, utilisateur et date : DN, Relevé des prix, Visites POS et Matériel POS. Chaque activité possède son propre statut et sa propre tournée.")
 
     df_pos_admin = load_sheet(SHEET_POS)
     df_users_admin = load_sheet(SHEET_USERS)
@@ -3485,11 +3558,12 @@ elif menu == "⚙️ Paramétrage des visites":
                 selected_user_label = st.selectbox("Utilisateur responsable", list(user_options.keys()))
             with c2:
                 planned_date = st.date_input("Date prévue de visite", value=datetime.now().date(), key="admin_planned_visit_date")
+                activity_options = ["DN", "PRIX", "VISITES_POS", "MATERIEL_POS"]
                 selected_types = st.multiselect(
                     "Activité(s) à réaliser",
-                    options=["DN", "PRIX"],
+                    options=activity_options,
                     default=["DN", "PRIX"],
-                    format_func=lambda x: "Distribution numérique" if x == "DN" else "Relevé des prix"
+                    format_func=visit_type_label
                 )
             save_assignment = st.form_submit_button("💾 Enregistrer l'affectation", use_container_width=True)
 
@@ -3497,7 +3571,7 @@ elif menu == "⚙️ Paramétrage des visites":
             selected_pos_id = pos_options[selected_pos_label]
             selected_user_id = user_options[selected_user_label]
             if not selected_types:
-                st.error("Sélectionnez au moins une activité : DN et/ou Relevé des prix.")
+                st.error("Sélectionnez au moins une activité à réaliser.")
             else:
                 try:
                     ensure_sheet_columns(
@@ -3523,15 +3597,17 @@ elif menu == "⚙️ Paramétrage des visites":
                         check["_date"] = pd.to_datetime(check[date_col], errors="coerce", dayfirst=True).dt.date
                         if "Type_Visite" in check.columns:
                             check["_type"] = check["Type_Visite"].apply(normalize_visit_type)
-                            # Une ancienne ligne sans type est considérée comme une affectation historique générique.
-                            type_match = check["_type"].isin([activity_type, ""])
+                            # Une affectation n'est un doublon que pour la même activité.
+                            # Les anciennes lignes sans type restent historiques et ne bloquent pas
+                            # la création des nouveaux types d'activité.
+                            type_match = check["_type"] == activity_type
                         else:
-                            type_match = pd.Series(True, index=check.index)
+                            type_match = pd.Series(False, index=check.index)
                         duplicate = ((check["_pos"] == selected_pos_id) &
                                      (check["_user"] == selected_user_id) &
                                      (check["_date"] == planned_date) & type_match).any()
                     if duplicate:
-                        duplicates.append("Distribution numérique" if activity_type == "DN" else "Relevé des prix")
+                        duplicates.append(visit_type_label(activity_type))
                         continue
                     assignment_id = str(uuid.uuid4())
                     success = append_dict_row(
@@ -3556,7 +3632,7 @@ elif menu == "⚙️ Paramétrage des visites":
                         }
                     )
                     if success:
-                        created_types.append("Distribution numérique" if activity_type == "DN" else "Relevé des prix")
+                        created_types.append(visit_type_label(activity_type))
                         # Mettre à jour le DataFrame local pour éviter un doublon dans le même formulaire.
                         new_record = {"ID_POS": selected_pos_id, "ID_User": selected_user_id, date_col or "Date_Visite": str(planned_date), "Type_Visite": activity_type}
                         existing = pd.concat([existing, pd.DataFrame([new_record])], ignore_index=True)
@@ -3593,144 +3669,53 @@ elif menu == "⚙️ Paramétrage des visites":
 
 elif menu == "🚗 Visites POS":
 
-    st.header(
-        "🚗 Visites POS"
-    )
+    st.header("🚗 Visites POS")
+    st.caption("Consultez uniquement les POS qui vous sont affectés pour une visite terrain à cette date.")
 
-    df_pos = load_sheet(
-        SHEET_POS
-    )
-
-    df_visits = load_sheet(
-        SHEET_VISITS
-    )
+    df_pos = load_sheet(SHEET_POS)
+    df_visits = load_sheet(SHEET_VISITS)
 
     if df_pos.empty:
-
-        st.warning(
-            "La table POS est vide."
-        )
-
+        st.warning("La table POS est vide.")
         st.stop()
-
-    st.subheader(
-        "📝 Nouvelle visite"
-    )
-
-    pos = st.selectbox(
-        "Point de vente",
-        ["--- Sélectionner ---"]
-        + unique_sorted(
-            df_pos,
-            "ID_POS"
-        ),
-        key="visit_pos"
-    )
 
     date_visite = st.date_input(
         "Date de visite",
         value=datetime.now().date(),
-        key="visit_date"
+        key="field_visit_date"
     )
 
-    motif = st.text_input(
-        "Motif de la visite",
-        key="visit_reason"
+    planned_pos_ids = get_user_planned_pos(
+        df_visits, date_visite, st.session_state.user_id, "VISITES_POS"
     )
 
-    resultat = st.selectbox(
-        "Résultat",
-        [
-            "Visite effectuée",
-            "POS fermé",
-            "Responsable absent",
-            "Refus",
-            "Autre"
-        ],
-        key="visit_result"
-    )
+    if not planned_pos_ids:
+        st.warning("Aucun POS ne vous est affecté pour l'activité Visites POS à cette date. Contactez votre responsable pour être planifié.")
+        st.stop()
 
-    observation = st.text_area(
-        "Observation",
-        key="visit_observation"
-    )
-
-    if st.button(
-        "💾 Enregistrer la visite",
+    st.subheader("🗓️ Mon planning — Visites POS")
+    st.dataframe(
+        build_planned_pos_table(
+            df_pos, planned_pos_ids, df_visits,
+            st.session_state.user_id, date_visite, "VISITES_POS"
+        ),
         use_container_width=True,
-        key="save_visit"
-    ):
-
-        errors = []
-
-        if pos == "--- Sélectionner ---":
-
-            errors.append(
-                "Sélectionnez un POS."
-            )
-
-        if errors:
-
-            for e in errors:
-                st.error(e)
-
-        else:
-
-            success = append_dict_row(
-                SHEET_VISITS,
-                {
-                    "ID_Visite":
-                        str(uuid.uuid4()),
-                    "ID":
-                        str(uuid.uuid4()),
-                    "Date_Visite":
-                        str(date_visite),
-                    "Date":
-                        str(date_visite),
-                    "ID_POS":
-                        pos,
-                    "Motif":
-                        motif,
-                    "Resultat":
-                        resultat,
-                    "Résultat":
-                        resultat,
-                    "Observation":
-                        observation,
-                    "ID_User":
-                        st.session_state.user_id
-                }
-            )
-
-            if success:
-
-                st.success(
-                    "✅ Visite enregistrée."
-                )
-
-                time.sleep(1)
-
-                st.rerun()
-
-    st.markdown("---")
-
-    st.subheader(
-        "📋 Historique des visites"
+        hide_index=True
     )
 
-    if not df_visits.empty:
+    pos_visit = st.selectbox(
+        "Point de vente prévu",
+        ["--- Sélectionner ---"] + planned_pos_ids,
+        key="field_visit_pos"
+    )
 
-        st.dataframe(
-            df_visits.tail(50),
-            use_container_width=True,
-            hide_index=True
-        )
+    visit_open = render_visit_tournee(
+        df_visits, pos_visit, date_visite,
+        st.session_state.user_id, "field_visit", "VISITES_POS"
+    )
 
-    else:
-
-        st.info(
-            "Aucune visite enregistrée."
-        )
+    if visit_open:
+        st.info("La tournée Visites POS est ouverte. Après votre passage, clôturez-la en indiquant le résultat et une observation si nécessaire.")
 
 
 # =========================================================
