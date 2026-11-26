@@ -814,6 +814,8 @@ def normalize_visit_type(value):
         return "VISITES_POS"
     if value in ("MATERIEL POS", "MATERIEL", "MATERIELS POS", "CONTROLE MATERIEL"):
         return "MATERIEL_POS"
+    if value in ("TACHE PERSONNALISEE", "TACHE PERSONNALISÉE", "CUSTOM", "AUTRE"):
+        return "CUSTOM"
     return ""  # Anciennes affectations sans Type_Visite : compatibilité historique.
 
 
@@ -822,7 +824,8 @@ def visit_type_label(value):
         "DN": "Distribution numérique",
         "PRIX": "Relevé des prix",
         "VISITES_POS": "Visites POS",
-        "MATERIEL_POS": "Matériel POS"
+        "MATERIEL_POS": "Matériel POS",
+        "CUSTOM": "Tâche personnalisée"
     }
     return labels.get(normalize_visit_type(value), "Activité non précisée")
 
@@ -988,6 +991,32 @@ def update_visit_tournee(df_visits, pos_id, visit_date, user_id, visit_type, val
         return True
     except Exception as exc:
         st.error(f"Impossible de mettre à jour la tournée : {exc}")
+        return False
+
+
+def update_visit_row_by_index(row_number, values):
+    """Met à jour directement une ligne de Visites_POS (numéro Google Sheets)."""
+    try:
+        headers = ensure_sheet_columns(
+            SHEET_VISITS,
+            ["Statut_Tournee", "Heure_Debut", "Heure_Fin",
+             "Motif_Cloture", "Observation_Cloture"]
+        )
+        ws = get_ws(SHEET_VISITS)
+        updates = []
+        for column_name, value in values.items():
+            if column_name in headers:
+                col_number = headers.index(column_name) + 1
+                updates.append({
+                    "range": f"{_column_letter(col_number)}{row_number}",
+                    "values": [[value]]
+                })
+        if updates:
+            ws.batch_update(updates, value_input_option="USER_ENTERED")
+        clear_sheet_cache(SHEET_VISITS)
+        return True
+    except Exception as exc:
+        st.error(f"Impossible de mettre à jour cette tâche : {exc}")
         return False
 
 
@@ -1368,8 +1397,90 @@ if menu == "📅 Ma journée":
     day_plan["ID_POS"] = day_plan["ID_POS"].apply(clean_text)
     day_plan["ID_User"] = day_plan["ID_User"].apply(clean_text)
     day_plan["_date"] = pd.to_datetime(day_plan[date_col], errors="coerce", dayfirst=True).dt.date
+
+    # Périmètre de consultation selon le rôle :
+    # Admin = tous ; Trade Manager = superviseurs + commerciaux ;
+    # Superviseur Trade = son équipe directe ; Commercial = lui-même.
+    df_day_users = load_sheet(SHEET_USERS)
+    current_role = normalize_role(st.session_state.role)
+    current_user_id = clean_text(st.session_state.user_id)
+    admin_roles = {"admin", "administrateur", "administrator"}
+    trade_manager_roles = {"manager trade", "trade manager"}
+    supervisor_roles = {"superviseur trade", "supervisor trade"}
+    commercial_roles = {"commercial", "commerciale"}
+
+    if df_day_users.empty or not {"ID_User", "Nom"}.issubset(df_day_users.columns):
+        st.error("La feuille Utilisateurs doit contenir ID_User et Nom pour afficher le suivi de l'équipe.")
+        st.stop()
+
+    team_users = df_day_users.copy()
+    team_users["ID_User"] = team_users["ID_User"].apply(clean_text)
+    team_users["Nom"] = team_users["Nom"].apply(clean_text)
+    if "Statut" in team_users.columns:
+        team_users = team_users[team_users["Statut"].apply(clean_text).str.lower() != "inactif"]
+    role_col = next((c for c in ("Role", "Rôle", "Fonction") if c in team_users.columns), None)
+    if role_col:
+        team_users["_role"] = team_users[role_col].apply(normalize_role)
+    else:
+        team_users["_role"] = ""
+
+    if current_role in admin_roles:
+        eligible_users = team_users.copy()
+        show_team_filter = True
+    elif current_role in trade_manager_roles:
+        eligible_users = team_users[
+            team_users["_role"].isin(supervisor_roles | commercial_roles)
+        ].copy()
+        show_team_filter = True
+    elif current_role in supervisor_roles:
+        # Colonne de rattachement hiérarchique facultative dans Utilisateurs.
+        supervisor_col = next((c for c in (
+            "ID_Superviseur", "ID_Supervisor", "Superviseur_ID",
+            "ID_Responsable", "ID_Manager", "Responsable_ID"
+        ) if c in team_users.columns), None)
+        if supervisor_col:
+            team_users["_supervisor_id"] = team_users[supervisor_col].apply(clean_text)
+            current_user_name = clean_text(st.session_state.user_name)
+            eligible_users = team_users[
+                (team_users["ID_User"] == current_user_id) |
+                (team_users["_supervisor_id"].isin([current_user_id, current_user_name]))
+            ].copy()
+        else:
+            eligible_users = team_users[team_users["ID_User"] == current_user_id].copy()
+            st.info(
+                "Pour afficher automatiquement toute l'équipe du superviseur, "
+                "ajoutez dans Utilisateurs une colonne ID_Superviseur contenant "
+                "l'ID_User du superviseur pour chaque commercial."
+            )
+        show_team_filter = True
+    else:
+        eligible_users = team_users[team_users["ID_User"] == current_user_id].copy()
+        show_team_filter = False
+
+    eligible_users = eligible_users[
+        (eligible_users["ID_User"] != "") & (eligible_users["Nom"] != "")
+    ].drop_duplicates(subset=["ID_User"])
+
+    if show_team_filter:
+        user_filter_options = {"Toute l'équipe": None}
+        for _, user_row in eligible_users.iterrows():
+            label = f"{user_row['Nom']} — {user_row['_role'] or 'Utilisateur'}"
+            user_filter_options[label] = user_row["ID_User"]
+        selected_team_member = st.selectbox(
+            "Filtrer par collaborateur",
+            list(user_filter_options.keys()),
+            key="my_day_team_filter"
+        )
+        selected_user_id = user_filter_options[selected_team_member]
+    else:
+        selected_user_id = current_user_id
+
+    allowed_user_ids = (
+        set(eligible_users["ID_User"].tolist())
+        if selected_user_id is None else {selected_user_id}
+    )
     day_plan = day_plan[
-        (day_plan["ID_User"] == clean_text(st.session_state.user_id))
+        (day_plan["ID_User"].isin(allowed_user_ids))
         & (day_plan["_date"] == day_date)
         & (day_plan["ID_POS"] != "")
     ].copy()
@@ -1383,9 +1494,14 @@ if menu == "📅 Ma journée":
     if "Statut_Tournee" not in day_plan.columns:
         day_plan["Statut_Tournee"] = "Planifiée"
 
+    if "Description_Tache" not in day_plan.columns:
+        day_plan["Description_Tache"] = ""
     day_plan["_type"] = day_plan["Type_Visite"].apply(normalize_visit_type)
-    day_plan["_type_label"] = day_plan["_type"].apply(
-        lambda x: visit_type_label(x) if x else "Activité non précisée"
+    day_plan["_type_label"] = day_plan.apply(
+        lambda row: clean_text(row.get("Description_Tache"))
+        if row["_type"] == "CUSTOM"
+        else (visit_type_label(row["_type"]) if row["_type"] else "Activité non précisée"),
+        axis=1
     )
 
     def day_task_status(value):
@@ -1457,6 +1573,8 @@ if menu == "📅 Ma journée":
         for _, task in group.iterrows():
             symbol, status_label, css_class = status_config[task["_status"]]
             task_name = activity_short.get(task["_type"], task["_type_label"])
+            if task["_type"] == "CUSTOM":
+                task_name = task["_type_label"] or "Tâche personnalisée"
             chips.append(
                 f'<span class="day-chip {css_class}">{html.escape(task_name)} '
                 f'<span class="symbol">{symbol}</span></span>'
@@ -1482,11 +1600,50 @@ if menu == "📅 Ma journée":
     </div>
     """, unsafe_allow_html=True)
 
-    with st.expander("📋 Voir le détail des tâches"):
+    with st.expander("📋 Voir le détail des tâches et leur suivi"):
         detail = day_plan[["_pos_label", "_type_label", "Statut_Tournee"]].copy()
         detail.columns = ["Point de vente", "Tâche", "Statut"]
         detail["Statut"] = detail["Statut"].apply(lambda x: clean_text(x) or "Planifiée")
         st.dataframe(detail, use_container_width=True, hide_index=True)
+
+        # Les tâches personnalisées ne sont rattachées à aucun module métier :
+        # leur démarrage et leur clôture se font directement ici.
+        custom_rows = day_plan[day_plan["_type"] == "CUSTOM"]
+        if not custom_rows.empty:
+            st.markdown("**Suivi des tâches personnalisées**")
+            for source_index, task in custom_rows.iterrows():
+                sheet_row = int(source_index) + 2
+                task_status = clean_text(task.get("Statut_Tournee")) or "Planifiée"
+                task_title = clean_text(task.get("Description_Tache")) or "Tâche personnalisée"
+                st.markdown(
+                    f"**{clean_text(task.get('_pos_label'))} — {task_title}**  "
+                    f"\nStatut : {task_status}"
+                )
+                if task_status.lower() in ("planifiée", "planifiee", "planifie", ""):
+                    if st.button("▶️ Démarrer", key=f"custom_start_{sheet_row}"):
+                        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        if update_visit_row_by_index(sheet_row, {
+                            "Statut_Tournee": "En cours",
+                            "Heure_Debut": now_text,
+                            "Heure_Fin": ""
+                        }):
+                            st.success("Tâche démarrée.")
+                            st.rerun()
+                elif task_status.lower() in ("en cours", "en_cours", "encours"):
+                    with st.form(f"custom_close_{sheet_row}"):
+                        custom_observation = st.text_area(
+                            "Commentaire de clôture (facultatif)",
+                            key=f"custom_obs_{sheet_row}"
+                        )
+                        if st.form_submit_button("🔒 Terminer la tâche"):
+                            now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            if update_visit_row_by_index(sheet_row, {
+                                "Statut_Tournee": "Terminée",
+                                "Heure_Fin": now_text,
+                                "Observation_Cloture": custom_observation
+                            }):
+                                st.success("Tâche terminée.")
+                                st.rerun()
 
 # =========================================================
 # DASHBOARD
@@ -3735,7 +3892,7 @@ elif menu == "⚙️ Paramétrage des visites":
         st.stop()
 
     st.header("⚙️ Paramétrage des visites")
-    st.caption("Affectez une ou plusieurs activités à chaque POS, utilisateur et date : DN, Relevé des prix, Visites POS et Matériel POS. Chaque activité possède son propre statut et sa propre tournée.")
+    st.caption("Planifiez les activités standards ou ajoutez une tâche personnalisée pour un POS, un collaborateur et une date.")
 
     df_pos_admin = load_sheet(SHEET_POS)
     df_users_admin = load_sheet(SHEET_USERS)
@@ -3779,13 +3936,17 @@ elif menu == "⚙️ Paramétrage des visites":
                 selected_user_label = st.selectbox("Utilisateur responsable", list(user_options.keys()))
             with c2:
                 planned_date = st.date_input("Date prévue de visite", value=datetime.now().date(), key="admin_planned_visit_date")
-                activity_options = ["DN", "PRIX", "VISITES_POS", "MATERIEL_POS"]
+                activity_options = ["DN", "PRIX", "VISITES_POS", "MATERIEL_POS", "CUSTOM"]
                 selected_types = st.multiselect(
                     "Activité(s) à réaliser",
                     options=activity_options,
                     default=["DN", "PRIX"],
                     format_func=visit_type_label
                 )
+            custom_task_description = st.text_input(
+                "Nom de la tâche personnalisée (à remplir si sélectionnée)",
+                placeholder="Ex. : Vérifier la visibilité de la marque"
+            )
             save_assignment = st.form_submit_button("💾 Enregistrer l'affectation", use_container_width=True)
 
         if save_assignment:
@@ -3793,12 +3954,14 @@ elif menu == "⚙️ Paramétrage des visites":
             selected_user_id = user_options[selected_user_label]
             if not selected_types:
                 st.error("Sélectionnez au moins une activité à réaliser.")
+            elif "CUSTOM" in selected_types and not clean_text(custom_task_description):
+                st.error("Saisissez le nom de la tâche personnalisée.")
             else:
                 try:
                     ensure_sheet_columns(
                         SHEET_VISITS,
                         [
-                            "Type_Visite", "Statut_Tournee", "Heure_Debut",
+                            "Type_Visite", "Description_Tache", "Statut_Tournee", "Heure_Debut",
                             "Heure_Fin", "Motif_Cloture", "Observation_Cloture"
                         ]
                     )
@@ -3824,9 +3987,15 @@ elif menu == "⚙️ Paramétrage des visites":
                             type_match = check["_type"] == activity_type
                         else:
                             type_match = pd.Series(False, index=check.index)
-                        duplicate = ((check["_pos"] == selected_pos_id) &
-                                     (check["_user"] == selected_user_id) &
-                                     (check["_date"] == planned_date) & type_match).any()
+                        duplicate_mask = ((check["_pos"] == selected_pos_id) &
+                                          (check["_user"] == selected_user_id) &
+                                          (check["_date"] == planned_date) & type_match)
+                        if activity_type == "CUSTOM" and "Description_Tache" in check.columns:
+                            duplicate_mask &= (
+                                check["Description_Tache"].apply(clean_text).str.casefold()
+                                == clean_text(custom_task_description).casefold()
+                            )
+                        duplicate = duplicate_mask.any()
                     if duplicate:
                         duplicates.append(visit_type_label(activity_type))
                         continue
@@ -3841,6 +4010,7 @@ elif menu == "⚙️ Paramétrage des visites":
                             "ID_POS": selected_pos_id,
                             "ID_User": selected_user_id,
                             "Type_Visite": activity_type,
+                            "Description_Tache": clean_text(custom_task_description) if activity_type == "CUSTOM" else "",
                             "Statut_Tournee": "Planifiée",
                             "Heure_Debut": "",
                             "Heure_Fin": "",
@@ -3853,9 +4023,17 @@ elif menu == "⚙️ Paramétrage des visites":
                         }
                     )
                     if success:
-                        created_types.append(visit_type_label(activity_type))
+                        created_types.append(
+                            clean_text(custom_task_description) if activity_type == "CUSTOM"
+                            else visit_type_label(activity_type)
+                        )
                         # Mettre à jour le DataFrame local pour éviter un doublon dans le même formulaire.
-                        new_record = {"ID_POS": selected_pos_id, "ID_User": selected_user_id, date_col or "Date_Visite": str(planned_date), "Type_Visite": activity_type}
+                        new_record = {
+                            "ID_POS": selected_pos_id, "ID_User": selected_user_id,
+                            date_col or "Date_Visite": str(planned_date),
+                            "Type_Visite": activity_type,
+                            "Description_Tache": clean_text(custom_task_description) if activity_type == "CUSTOM" else ""
+                        }
                         existing = pd.concat([existing, pd.DataFrame([new_record])], ignore_index=True)
                 if created_types:
                     clear_sheet_cache(SHEET_VISITS)
@@ -3879,9 +4057,15 @@ elif menu == "⚙️ Paramétrage des visites":
                 plan["Point de vente"] = plan["ID_POS"].map(lambda x: (x + " - " + pos_name_map[x]) if pos_name_map.get(x) else x)
                 plan["Utilisateur"] = plan["ID_User"].map(lambda x: user_name_map.get(x, x))
                 if "Type_Visite" in plan.columns:
-                    plan["Type de visite"] = plan["Type_Visite"].apply(lambda x: visit_type_label(x) if normalize_visit_type(x) else "Ancienne affectation (type non précisé)")
+                    plan["Type de visite"] = plan["Type_Visite"].apply(
+                        lambda x: visit_type_label(x) if normalize_visit_type(x)
+                        else "Ancienne affectation (type non précisé)"
+                    )
                 else:
                     plan["Type de visite"] = "Ancienne affectation (type non précisé)"
+                if "Description_Tache" in plan.columns:
+                    custom_mask = plan["Type_Visite"].apply(normalize_visit_type) == "CUSTOM"
+                    plan.loc[custom_mask, "Type de visite"] = plan.loc[custom_mask, "Description_Tache"].apply(clean_text)
                 plan["Statut"] = plan.get("Statut_Tournee", pd.Series("Planifiée", index=plan.index)).fillna("").replace("", "Planifiée")
                 display_cols = [c for c in ["Date prévue", "Utilisateur", "Point de vente", "Type de visite", "Statut"] if c in plan.columns]
                 st.dataframe(plan[display_cols].sort_values("Date prévue", na_position="last"), use_container_width=True, hide_index=True)
