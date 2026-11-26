@@ -1220,6 +1220,7 @@ if st.sidebar.button("🔄 Actualiser les données", use_container_width=True):
 role_key = normalize_role(st.session_state.role)
 
 all_menu_items = [
+    "📅 Ma journée",
     "🏠 Dashboard",
     "📦 Distribution Numérique",
     "👤 Profil Client",
@@ -1242,8 +1243,8 @@ elif role_key in supervisor_roles:
     # Accès à tous les modules opérationnels, sauf au paramétrage du planning.
     menu_items = all_menu_items.copy()
 elif role_key in commercial_roles:
-    # Le rôle Commerciale est limité au Profil Client.
-    menu_items = ["👤 Profil Client"]
+    # Le commercial accède à son programme quotidien et au Profil Client.
+    menu_items = ["📅 Ma journée", "👤 Profil Client"]
 else:
     menu_items = []
     st.sidebar.error("Votre rôle n'est pas reconnu. Contactez l'administrateur.")
@@ -1278,6 +1279,186 @@ st.caption(
     f"Utilisateur connecté : "
     f"{st.session_state.user_name}"
 )
+
+
+# =========================================================
+# MA JOURNEE
+# =========================================================
+
+if menu == "📅 Ma journée":
+
+    st.header("📅 Ma journée")
+    st.caption("Vue globale de vos activités planifiées, regroupées par point de vente.")
+
+    day_date = st.date_input(
+        "Date du programme",
+        value=datetime.now().date(),
+        key="my_day_date"
+    )
+
+    df_day_visits = load_sheet(SHEET_VISITS)
+    df_day_pos = load_sheet(SHEET_POS)
+
+    if df_day_visits.empty:
+        st.info("Aucune activité n'est planifiée pour le moment.")
+        st.stop()
+
+    date_col = next(
+        (c for c in ("Date_Visite", "Date") if c in df_day_visits.columns),
+        None
+    )
+
+    required_cols = {"ID_POS", "ID_User"}
+    if date_col is None or not required_cols.issubset(df_day_visits.columns):
+        st.error(
+            "La feuille Visites_POS doit contenir au minimum "
+            "Date_Visite (ou Date), ID_POS et ID_User."
+        )
+        st.stop()
+
+    day_plan = df_day_visits.copy()
+    day_plan["ID_POS"] = day_plan["ID_POS"].apply(clean_text)
+    day_plan["ID_User"] = day_plan["ID_User"].apply(clean_text)
+    day_plan["_date"] = pd.to_datetime(
+        day_plan[date_col], errors="coerce", dayfirst=True
+    ).dt.date
+
+    day_plan = day_plan[
+        (day_plan["ID_User"] == clean_text(st.session_state.user_id))
+        & (day_plan["_date"] == day_date)
+        & (day_plan["ID_POS"] != "")
+    ].copy()
+
+    if day_plan.empty:
+        st.info(
+            f"Aucune activité ne vous est affectée pour le "
+            f"{day_date.strftime('%d/%m/%Y')}."
+        )
+        st.stop()
+
+    if "Type_Visite" not in day_plan.columns:
+        day_plan["Type_Visite"] = ""
+
+    if "Statut_Tournee" not in day_plan.columns:
+        day_plan["Statut_Tournee"] = "Planifiée"
+
+    day_plan["_type"] = day_plan["Type_Visite"].apply(normalize_visit_type)
+    day_plan["_type_label"] = day_plan["_type"].apply(
+        lambda x: visit_type_label(x) if x else "Activité non précisée"
+    )
+
+    def day_task_status(value):
+        value = clean_text(value).strip().lower()
+        if value in ("", "planifiée", "planifiee", "planifie"):
+            return "○ À faire"
+        if value in ("en cours", "en_cours", "encours"):
+            return "◷ En cours"
+        return "✓ Terminé"
+
+    day_plan["_status_display"] = day_plan["Statut_Tournee"].apply(day_task_status)
+    day_plan["_is_done"] = day_plan["_status_display"] == "✓ Terminé"
+
+    # Nom du POS : on utilise le référentiel POS, sans modifier Google Sheets.
+    if not df_day_pos.empty and "ID_POS" in df_day_pos.columns:
+        pos_ref = df_day_pos.copy()
+        pos_ref["ID_POS"] = pos_ref["ID_POS"].apply(clean_text)
+        name_col = "Nom_POS" if "Nom_POS" in pos_ref.columns else (
+            "Nom" if "Nom" in pos_ref.columns else None
+        )
+        if name_col:
+            pos_name_map = dict(zip(pos_ref["ID_POS"], pos_ref[name_col].apply(clean_text)))
+        else:
+            pos_name_map = {}
+    else:
+        pos_name_map = {}
+
+    day_plan["_pos_label"] = day_plan["ID_POS"].apply(
+        lambda x: f"{x} - {pos_name_map[x]}" if pos_name_map.get(x) else x
+    )
+
+    total_pos = day_plan["ID_POS"].nunique()
+    total_tasks = len(day_plan)
+    completed_tasks = int(day_plan["_is_done"].sum())
+    remaining_tasks = total_tasks - completed_tasks
+    in_progress_tasks = int((day_plan["_status_display"] == "◷ En cours").sum())
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("POS planifiés", total_pos)
+    m2.metric("Tâches terminées", completed_tasks)
+    m3.metric("Tâches restantes", remaining_tasks)
+    m4.metric("Tâches en cours", in_progress_tasks)
+
+    st.progress(
+        completed_tasks / total_tasks if total_tasks else 0,
+        text=f"Avancement global : {completed_tasks}/{total_tasks} tâches terminées"
+    )
+
+    st.subheader("📍 Programme par point de vente")
+
+    activity_columns = {
+        "DN": "Distribution numérique",
+        "PRIX": "Relevé des prix",
+        "VISITES_POS": "Visites POS",
+        "MATERIEL_POS": "Matériel POS"
+    }
+
+    display_rows = []
+    for pos_id, group in day_plan.groupby("ID_POS", sort=False):
+        first = group.iloc[0]
+        item = {
+            "Point de vente": first["_pos_label"],
+            "DN": "—",
+            "Prix": "—",
+            "Visite": "—",
+            "Matériel": "—",
+            "Avancement": f"{int(group['_is_done'].sum())}/{len(group)} tâches"
+        }
+
+        for _, task in group.iterrows():
+            task_type = task["_type"]
+            if task_type == "DN":
+                col = "DN"
+            elif task_type == "PRIX":
+                col = "Prix"
+            elif task_type == "VISITES_POS":
+                col = "Visite"
+            elif task_type == "MATERIEL_POS":
+                col = "Matériel"
+            else:
+                col = "Autre"
+
+            if col not in item:
+                item[col] = "—"
+
+            status_text = task["_status_display"]
+            if item[col] == "—":
+                item[col] = status_text
+            else:
+                item[col] += " / " + status_text
+
+        display_rows.append(item)
+
+    day_table = pd.DataFrame(display_rows)
+    st.dataframe(
+        day_table,
+        use_container_width=True,
+        hide_index=True
+    )
+
+    with st.expander("📋 Détail de toutes les tâches"):
+        detail = day_plan[
+            ["_pos_label", "_type_label", "Statut_Tournee"]
+        ].copy()
+        detail.columns = ["Point de vente", "Tâche", "Statut"]
+        detail["Statut"] = detail["Statut"].apply(
+            lambda x: clean_text(x) or "Planifiée"
+        )
+        st.dataframe(detail, use_container_width=True, hide_index=True)
+
+    st.caption(
+        "Légende : ○ À faire · ◷ En cours · ✓ Terminé. "
+        "Une tâche est considérée terminée lorsque sa tournée est clôturée."
+    )
 
 
 # =========================================================
