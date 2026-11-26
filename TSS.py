@@ -1287,8 +1287,64 @@ st.caption(
 
 if menu == "📅 Ma journée":
 
-    st.header("📅 Ma journée")
-    st.caption("Vue globale de vos activités planifiées, regroupées par point de vente.")
+    import html
+
+    # Interface inspirée de la maquette fournie : carte blanche, compteurs gris,
+    # pastilles de statut vert/orange et regroupement des tâches par POS.
+    st.markdown("""
+    <style>
+    .day-shell { background:#fff; border:1px solid #e5e7eb; border-radius:24px;
+        padding:24px; margin:8px 0 20px 0; }
+    .day-heading { display:flex; align-items:center; justify-content:space-between;
+        gap:12px; margin-bottom:22px; }
+    .day-title { font-size:30px; font-weight:750; color:#171717; }
+    .day-today { background:#d9f5e4; color:#168044; border-radius:30px;
+        padding:9px 18px; font-size:17px; font-weight:700; white-space:nowrap; }
+    .day-kpis { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px;
+        margin-bottom:28px; }
+    .day-kpi { background:#f3f4f4; border-radius:22px; padding:17px 18px; min-height:112px; }
+    .day-kpi-num { font-size:42px; line-height:1.1; font-weight:750; color:#171717; }
+    .day-kpi-num.green { color:#168044; }
+    .day-kpi-num.orange { color:#a84c0b; }
+    .day-kpi-label { color:#666; font-size:17px; margin-top:13px; }
+    .day-table-head { display:grid; grid-template-columns:minmax(145px,1.1fr) minmax(250px,2fr) minmax(105px,.7fr);
+        gap:12px; padding:8px 2px 14px; border-bottom:2px solid #e5e7eb;
+        font-size:17px; font-weight:750; color:#171717; }
+    .day-row { display:grid; grid-template-columns:minmax(145px,1.1fr) minmax(250px,2fr) minmax(105px,.7fr);
+        gap:12px; align-items:center; padding:17px 2px; border-bottom:1px solid #e5e7eb; }
+    .day-pos { font-size:20px; font-weight:700; color:#171717; }
+    .day-pos-sub { font-size:14px; color:#777; margin-top:3px; }
+    .day-tasks { display:flex; flex-wrap:wrap; gap:8px; }
+    .day-chip { display:inline-flex; align-items:center; gap:7px; padding:8px 13px;
+        border-radius:24px; font-size:14px; white-space:nowrap; }
+    .day-chip.done { background:#dcf6e5; color:#16783d; }
+    .day-chip.progress { background:#fff0d9; color:#a65a08; }
+    .day-chip.todo { background:#ffede5; color:#a94e1b; }
+    .day-chip .symbol { font-size:17px; font-weight:800; }
+    .day-progress-label { display:inline-block; background:#e0f5e7; color:#176f3b;
+        border-radius:20px; padding:5px 12px; font-weight:700; margin-bottom:7px; }
+    .day-progress-track { width:100%; height:9px; background:#e5e7eb; border-radius:20px; overflow:hidden; }
+    .day-progress-fill { height:9px; background:#159447; border-radius:20px; }
+    .day-legend { display:flex; flex-wrap:wrap; gap:20px; padding-top:20px; color:#555; font-size:14px; }
+    .day-legend span { display:inline-flex; align-items:center; gap:7px; }
+    .day-dot { width:24px; height:24px; border-radius:50%; display:inline-flex;
+        align-items:center; justify-content:center; font-weight:800; }
+    .day-dot.done { background:#dcf6e5; color:#168044; }
+    .day-dot.progress { background:#fff0d9; color:#a65a08; }
+    .day-dot.todo { background:#ffede5; color:#a94e1b; }
+    @media(max-width:700px) {
+        .day-shell { padding:15px; border-radius:18px; }
+        .day-kpis { grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; }
+        .day-kpi { min-height:90px; padding:13px; }
+        .day-kpi-num { font-size:32px; }
+        .day-kpi-label { font-size:14px; }
+        .day-table-head { display:none; }
+        .day-row { grid-template-columns:1fr; gap:10px; }
+        .day-progress { max-width:180px; }
+        .day-title { font-size:24px; }
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
     day_date = st.date_input(
         "Date du programme",
@@ -1303,26 +1359,15 @@ if menu == "📅 Ma journée":
         st.info("Aucune activité n'est planifiée pour le moment.")
         st.stop()
 
-    date_col = next(
-        (c for c in ("Date_Visite", "Date") if c in df_day_visits.columns),
-        None
-    )
-
-    required_cols = {"ID_POS", "ID_User"}
-    if date_col is None or not required_cols.issubset(df_day_visits.columns):
-        st.error(
-            "La feuille Visites_POS doit contenir au minimum "
-            "Date_Visite (ou Date), ID_POS et ID_User."
-        )
+    date_col = next((c for c in ("Date_Visite", "Date") if c in df_day_visits.columns), None)
+    if date_col is None or not {"ID_POS", "ID_User"}.issubset(df_day_visits.columns):
+        st.error("La feuille Visites_POS doit contenir Date_Visite (ou Date), ID_POS et ID_User.")
         st.stop()
 
     day_plan = df_day_visits.copy()
     day_plan["ID_POS"] = day_plan["ID_POS"].apply(clean_text)
     day_plan["ID_User"] = day_plan["ID_User"].apply(clean_text)
-    day_plan["_date"] = pd.to_datetime(
-        day_plan[date_col], errors="coerce", dayfirst=True
-    ).dt.date
-
+    day_plan["_date"] = pd.to_datetime(day_plan[date_col], errors="coerce", dayfirst=True).dt.date
     day_plan = day_plan[
         (day_plan["ID_User"] == clean_text(st.session_state.user_id))
         & (day_plan["_date"] == day_date)
@@ -1330,15 +1375,11 @@ if menu == "📅 Ma journée":
     ].copy()
 
     if day_plan.empty:
-        st.info(
-            f"Aucune activité ne vous est affectée pour le "
-            f"{day_date.strftime('%d/%m/%Y')}."
-        )
+        st.info(f"Aucune activité ne vous est affectée pour le {day_date.strftime('%d/%m/%Y')}.")
         st.stop()
 
     if "Type_Visite" not in day_plan.columns:
         day_plan["Type_Visite"] = ""
-
     if "Statut_Tournee" not in day_plan.columns:
         day_plan["Statut_Tournee"] = "Planifiée"
 
@@ -1350,25 +1391,25 @@ if menu == "📅 Ma journée":
     def day_task_status(value):
         value = clean_text(value).strip().lower()
         if value in ("", "planifiée", "planifiee", "planifie"):
-            return "○ À faire"
+            return "todo"
         if value in ("en cours", "en_cours", "encours"):
-            return "◷ En cours"
-        return "✓ Terminé"
+            return "progress"
+        # Les statuts finaux (Visitée, POS fermé, Refus d'accès, etc.) sont clôturés.
+        return "done"
 
-    day_plan["_status_display"] = day_plan["Statut_Tournee"].apply(day_task_status)
-    day_plan["_is_done"] = day_plan["_status_display"] == "✓ Terminé"
+    status_config = {
+        "done": ("✓", "Terminée", "done"),
+        "progress": ("◷", "En cours", "progress"),
+        "todo": ("○", "À faire", "todo")
+    }
+    day_plan["_status"] = day_plan["Statut_Tournee"].apply(day_task_status)
+    day_plan["_is_done"] = day_plan["_status"] == "done"
 
-    # Nom du POS : on utilise le référentiel POS, sans modifier Google Sheets.
     if not df_day_pos.empty and "ID_POS" in df_day_pos.columns:
         pos_ref = df_day_pos.copy()
         pos_ref["ID_POS"] = pos_ref["ID_POS"].apply(clean_text)
-        name_col = "Nom_POS" if "Nom_POS" in pos_ref.columns else (
-            "Nom" if "Nom" in pos_ref.columns else None
-        )
-        if name_col:
-            pos_name_map = dict(zip(pos_ref["ID_POS"], pos_ref[name_col].apply(clean_text)))
-        else:
-            pos_name_map = {}
+        name_col = "Nom_POS" if "Nom_POS" in pos_ref.columns else ("Nom" if "Nom" in pos_ref.columns else None)
+        pos_name_map = dict(zip(pos_ref["ID_POS"], pos_ref[name_col].apply(clean_text))) if name_col else {}
     else:
         pos_name_map = {}
 
@@ -1380,86 +1421,72 @@ if menu == "📅 Ma journée":
     total_tasks = len(day_plan)
     completed_tasks = int(day_plan["_is_done"].sum())
     remaining_tasks = total_tasks - completed_tasks
-    in_progress_tasks = int((day_plan["_status_display"] == "◷ En cours").sum())
+    in_progress_tasks = int((day_plan["_status"] == "progress").sum())
+    today_label = "Aujourd'hui" if day_date == datetime.now().date() else day_date.strftime("%d/%m/%Y")
+    date_icon = day_date.strftime("%d")
+    date_month = day_date.strftime("%b").capitalize()
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("POS planifiés", total_pos)
-    m2.metric("Tâches terminées", completed_tasks)
-    m3.metric("Tâches restantes", remaining_tasks)
-    m4.metric("Tâches en cours", in_progress_tasks)
+    st.markdown(f"""
+    <div class="day-shell">
+      <div class="day-heading">
+        <div style="display:flex;align-items:center;gap:14px;">
+          <div style="border:1px solid #ddd;border-radius:7px;overflow:hidden;text-align:center;min-width:48px;background:#fff;">
+            <div style="background:#ef5350;color:white;font-size:12px;font-weight:700;padding:2px 5px;">{html.escape(date_month)}</div>
+            <div style="font-size:24px;font-weight:750;line-height:1.3;color:#171717;">{html.escape(date_icon)}</div>
+          </div>
+          <div class="day-title">Ma journée</div>
+        </div>
+        <div class="day-today">{html.escape(today_label)}</div>
+      </div>
+      <div class="day-kpis">
+        <div class="day-kpi"><div class="day-kpi-num">{total_pos}</div><div class="day-kpi-label">POS planifiés</div></div>
+        <div class="day-kpi"><div class="day-kpi-num">{total_tasks}</div><div class="day-kpi-label">Tâches planifiées</div></div>
+        <div class="day-kpi"><div class="day-kpi-num green">{completed_tasks}</div><div class="day-kpi-label">Terminées</div></div>
+        <div class="day-kpi"><div class="day-kpi-num orange">{remaining_tasks}</div><div class="day-kpi-label">Restantes</div></div>
+      </div>
+      <div class="day-table-head"><div>Point de vente</div><div>Tâches</div><div>Avancement</div></div>
+    """, unsafe_allow_html=True)
 
-    st.progress(
-        completed_tasks / total_tasks if total_tasks else 0,
-        text=f"Avancement global : {completed_tasks}/{total_tasks} tâches terminées"
-    )
-
-    st.subheader("📍 Programme par point de vente")
-
-    activity_columns = {
-        "DN": "Distribution numérique",
-        "PRIX": "Relevé des prix",
-        "VISITES_POS": "Visites POS",
-        "MATERIEL_POS": "Matériel POS"
-    }
-
-    display_rows = []
+    activity_short = {"DN": "DN", "PRIX": "Prix", "VISITES_POS": "Visite", "MATERIEL_POS": "Matériel"}
     for pos_id, group in day_plan.groupby("ID_POS", sort=False):
-        first = group.iloc[0]
-        item = {
-            "Point de vente": first["_pos_label"],
-            "DN": "—",
-            "Prix": "—",
-            "Visite": "—",
-            "Matériel": "—",
-            "Avancement": f"{int(group['_is_done'].sum())}/{len(group)} tâches"
-        }
-
+        pos_label = html.escape(str(group.iloc[0]["_pos_label"]))
+        done_count = int(group["_is_done"].sum())
+        task_count = len(group)
+        pct = int(done_count / task_count * 100) if task_count else 0
+        chips = []
         for _, task in group.iterrows():
-            task_type = task["_type"]
-            if task_type == "DN":
-                col = "DN"
-            elif task_type == "PRIX":
-                col = "Prix"
-            elif task_type == "VISITES_POS":
-                col = "Visite"
-            elif task_type == "MATERIEL_POS":
-                col = "Matériel"
-            else:
-                col = "Autre"
+            symbol, status_label, css_class = status_config[task["_status"]]
+            task_name = activity_short.get(task["_type"], task["_type_label"])
+            chips.append(
+                f'<span class="day-chip {css_class}">{html.escape(task_name)} '
+                f'<span class="symbol">{symbol}</span></span>'
+            )
+        chips_html = "".join(chips)
+        st.markdown(f"""
+        <div class="day-row">
+          <div><div class="day-pos">{pos_label}</div><div class="day-pos-sub">{task_count} tâche(s)</div></div>
+          <div class="day-tasks">{chips_html}</div>
+          <div class="day-progress">
+            <div class="day-progress-label">{done_count} / {task_count}</div>
+            <div class="day-progress-track"><div class="day-progress-fill" style="width:{pct}%;"></div></div>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
 
-            if col not in item:
-                item[col] = "—"
+    st.markdown("""
+      <div class="day-legend">
+        <span><i class="day-dot done">✓</i> Terminée</span>
+        <span><i class="day-dot progress">◷</i> En cours</span>
+        <span><i class="day-dot todo">○</i> À faire</span>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-            status_text = task["_status_display"]
-            if item[col] == "—":
-                item[col] = status_text
-            else:
-                item[col] += " / " + status_text
-
-        display_rows.append(item)
-
-    day_table = pd.DataFrame(display_rows)
-    st.dataframe(
-        day_table,
-        use_container_width=True,
-        hide_index=True
-    )
-
-    with st.expander("📋 Détail de toutes les tâches"):
-        detail = day_plan[
-            ["_pos_label", "_type_label", "Statut_Tournee"]
-        ].copy()
+    with st.expander("📋 Voir le détail des tâches"):
+        detail = day_plan[["_pos_label", "_type_label", "Statut_Tournee"]].copy()
         detail.columns = ["Point de vente", "Tâche", "Statut"]
-        detail["Statut"] = detail["Statut"].apply(
-            lambda x: clean_text(x) or "Planifiée"
-        )
+        detail["Statut"] = detail["Statut"].apply(lambda x: clean_text(x) or "Planifiée")
         st.dataframe(detail, use_container_width=True, hide_index=True)
-
-    st.caption(
-        "Légende : ○ À faire · ◷ En cours · ✓ Terminé. "
-        "Une tâche est considérée terminée lorsque sa tournée est clôturée."
-    )
-
 
 # =========================================================
 # DASHBOARD
